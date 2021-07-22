@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-import { TestReason, getTestTasks, filterTasks } from './tasks';
+import { TestReason, getTestTasks, filterTasks, logTasks } from './tasks';
 import { spawn } from 'child-process-promise';
 import chalk from 'chalk';
 import { resolve } from 'path';
@@ -27,14 +27,20 @@ const argv = yargs.options({
   // TODO: remove once modular SDKs become official
   buildAppExp: {
     type: 'boolean',
-    desc:
-      'whether or not build @firebase/app-exp first. It is a hack required to build Firestore'
+    desc: 'whether or not build @firebase/app-exp first. It is a hack required to build Firestore'
+  },
+  buildAppCompat: {
+    type: 'boolean',
+    desc: 'whether or not build @firebase/app-compat first. It is a hack required to build Firestore'
+  },
+  buildAll: {
+    type: 'boolean',
+    desc: 'if true, build all packages. Used in Test Auth workflow because Auth tests depends on the firebase package'
   }
 }).argv;
 
 const allTestConfigNames = Object.keys(testConfig);
-const inputTestConfigName = argv._[0];
-const buildAppExp = argv.buildAppExp;
+const inputTestConfigName = argv._[0].toString();
 
 if (!inputTestConfigName) {
   throw Error(`
@@ -54,14 +60,30 @@ if (!allTestConfigNames.includes(inputTestConfigName)) {
 
 const config = testConfig[inputTestConfigName]!;
 
-buildForTests(config, buildAppExp);
+buildForTests(config, argv);
 
-async function buildForTests(config: TestConfig, buildAppExp = false) {
+interface Options {
+  buildAppExp?: boolean;
+  buildAppCompat?: boolean;
+  buildAll?: boolean;
+}
+
+async function buildForTests(
+  config: TestConfig,
+  { buildAppExp = false, buildAppCompat = false, buildAll = false }: Options
+) {
   try {
     const testTasks = filterTasks(await getTestTasks(), config);
-
+    // print tasks for info
+    logTasks(testTasks);
     if (testTasks.length === 0) {
       console.log(chalk`{green No test tasks. Skipping all builds }`);
+      return;
+    }
+
+    // build all and return
+    if (buildAll) {
+      await spawn('yarn', ['build'], { stdio: 'inherit', cwd: root });
       return;
     }
 
@@ -76,6 +98,40 @@ async function buildForTests(config: TestConfig, buildAppExp = false) {
           'run',
           '--scope',
           '@firebase/app-exp',
+          '--include-dependencies',
+          'build'
+        ],
+        { stdio: 'inherit', cwd: root }
+      );
+    }
+    // hack to build Firestore which depends on @firebase/app-compat (because of firestore exp),
+    // but doesn't list it as a dependency in its package.json
+    // TODO: remove once modular SDKs become official
+    if (buildAppCompat) {
+      await spawn(
+        'npx',
+        [
+          'lerna',
+          'run',
+          '--scope',
+          '@firebase/app-compat',
+          '--include-dependencies',
+          'build'
+        ],
+        { stdio: 'inherit', cwd: root }
+      );
+    }
+    // hack to build Storage which depends on @firebase/auth-exp (because of integration test),
+    // but doesn't list it as a dependency in its package.json
+    // TODO: remove once modular SDKs become official
+    if (testTasks.some(task => task.pkgName.includes('storage'))) {
+      await spawn(
+        'npx',
+        [
+          'lerna',
+          'run',
+          '--scope',
+          '@firebase/auth-exp',
           '--include-dependencies',
           'build'
         ],

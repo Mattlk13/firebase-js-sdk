@@ -15,6 +15,9 @@
  * limitations under the License.
  */
 
+import { expect } from 'chai';
+
+import { EmulatorCredentialsProvider } from '../../../src/api/credentials';
 import {
   collectionReference,
   documentReference,
@@ -24,12 +27,15 @@ import {
   querySnapshot
 } from '../../util/api_helpers';
 import { expectEqual, expectNotEqual, keys } from '../../util/helpers';
-import { expect } from 'chai';
 
 describe('CollectionReference', () => {
   it('support equality checking with isEqual()', () => {
     expectEqual(collectionReference('foo'), collectionReference('foo'));
     expectNotEqual(collectionReference('foo'), collectionReference('bar'));
+  });
+
+  it('JSON.stringify() does not throw', () => {
+    JSON.stringify(collectionReference('foo'));
   });
 });
 
@@ -40,6 +46,10 @@ describe('DocumentReference', () => {
       documentReference('rooms/foo'),
       documentReference('rooms/bar')
     );
+  });
+
+  it('JSON.stringify() does not throw', () => {
+    JSON.stringify(documentReference('foo/bar'));
   });
 });
 
@@ -71,12 +81,20 @@ describe('DocumentSnapshot', () => {
       documentSnapshot('rooms/bar', { a: 1 }, false)
     );
   });
+
+  it('JSON.stringify() does not throw', () => {
+    JSON.stringify(documentSnapshot('foo/bar', { a: 1 }, true));
+  });
 });
 
 describe('Query', () => {
   it('support equality checking with isEqual()', () => {
     expectEqual(query('foo'), query('foo'));
     expectNotEqual(query('foo'), query('bar'));
+  });
+
+  it('JSON.stringify() does not throw', () => {
+    JSON.stringify(query('foo'));
   });
 });
 
@@ -122,6 +140,12 @@ describe('QuerySnapshot', () => {
       querySnapshot('foo', {}, { a: { a: 1 } }, keys('foo/a'), false, true)
     );
   });
+
+  it('JSON.stringify() does not throw', () => {
+    JSON.stringify(
+      querySnapshot('foo', {}, { a: { a: 1 } }, keys(), false, false)
+    );
+  });
 });
 
 describe('SnapshotMetadata', () => {
@@ -159,27 +183,85 @@ describe('SnapshotMetadata', () => {
 describe('Settings', () => {
   it('replaces settings by default', () => {
     // Use a new instance of Firestore in order to configure settings.
-    const firestoreClient = newTestFirestore();
-    firestoreClient.settings({ host: 'other.host' });
-    firestoreClient.settings({ ignoreUndefinedProperties: true });
+    const db = newTestFirestore();
+    db.settings({ host: 'other.host' });
+    db.settings({ ignoreUndefinedProperties: true });
 
-    expect(firestoreClient._getSettings().ignoreUndefinedProperties).to.be.true;
+    expect(db._delegate._getSettings().ignoreUndefinedProperties).to.be.true;
     // Expect host to be replaced with default host.
-    expect(firestoreClient._getSettings().host).to.equal(
+    expect(db._delegate._getSettings().host).to.equal(
       'firestore.googleapis.com'
+    );
+  });
+
+  it('can not use mutually exclusive settings together', () => {
+    // Use a new instance of Firestore in order to configure settings.
+    const db = newTestFirestore();
+    expect(() =>
+      db.settings({
+        experimentalForceLongPolling: true,
+        experimentalAutoDetectLongPolling: true
+      })
+    ).to.throw(
+      `experimentalForceLongPolling and experimentalAutoDetectLongPolling cannot be used together.`
     );
   });
 
   it('can merge settings', () => {
     // Use a new instance of Firestore in order to configure settings.
-    const firestoreClient = newTestFirestore();
-    firestoreClient.settings({ host: 'other.host' });
-    firestoreClient.settings({
+    const db = newTestFirestore();
+    db.settings({ host: 'other.host' });
+    db.settings({
       ignoreUndefinedProperties: true,
       merge: true
     });
 
-    expect(firestoreClient._getSettings().ignoreUndefinedProperties).to.be.true;
-    expect(firestoreClient._getSettings().host).to.equal('other.host');
+    expect(db._delegate._getSettings().ignoreUndefinedProperties).to.be.true;
+    expect(db._delegate._getSettings().host).to.equal('other.host');
+  });
+
+  it('can use `merge` without previous call to settings()', () => {
+    // Use a new instance of Firestore in order to configure settings.
+    const db = newTestFirestore();
+    db.settings({ host: 'other.host' });
+    db.settings({
+      ignoreUndefinedProperties: true,
+      merge: true
+    });
+
+    expect(db._delegate._getSettings().ignoreUndefinedProperties).to.be.true;
+    expect(db._delegate._getSettings().host).to.equal('other.host');
+  });
+
+  it('gets settings from useEmulator', () => {
+    // Use a new instance of Firestore in order to configure settings.
+    const db = newTestFirestore();
+    db.useEmulator('localhost', 9000);
+
+    expect(db._delegate._getSettings().host).to.equal('localhost:9000');
+    expect(db._delegate._getSettings().ssl).to.be.false;
+  });
+
+  it('prefers host from useEmulator to host from settings', () => {
+    // Use a new instance of Firestore in order to configure settings.
+    const db = newTestFirestore();
+    db.settings({ host: 'other.host' });
+    db.useEmulator('localhost', 9000);
+
+    expect(db._delegate._getSettings().host).to.equal('localhost:9000');
+    expect(db._delegate._getSettings().ssl).to.be.false;
+  });
+
+  it('sets credentials based on mockUserToken', async () => {
+    // Use a new instance of Firestore in order to configure settings.
+    const db = newTestFirestore();
+    const mockUserToken = { sub: 'foobar' };
+    db.useEmulator('localhost', 9000, { mockUserToken });
+
+    const credentials = db._delegate._credentials;
+    expect(credentials).to.be.instanceOf(EmulatorCredentialsProvider);
+    const token = await credentials.getToken();
+    expect(token!.type).to.eql('OAuth');
+    expect(token!.user.uid).to.eql(mockUserToken.sub);
   });
 });

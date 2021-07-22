@@ -17,20 +17,17 @@
 
 import { Query } from '../../../src/core/query';
 import { SnapshotVersion } from '../../../src/core/snapshot_version';
+import { remoteDocumentCacheGetNewDocumentChanges } from '../../../src/local/indexeddb_remote_document_cache';
 import { Persistence } from '../../../src/local/persistence';
 import { PersistencePromise } from '../../../src/local/persistence_promise';
 import { RemoteDocumentCache } from '../../../src/local/remote_document_cache';
-import { IndexedDbRemoteDocumentCache } from '../../../src/local/indexeddb_remote_document_cache';
 import { RemoteDocumentChangeBuffer } from '../../../src/local/remote_document_change_buffer';
 import {
   DocumentKeySet,
-  DocumentMap,
-  MaybeDocumentMap,
-  NullableMaybeDocumentMap
+  MutableDocumentMap
 } from '../../../src/model/collections';
-import { MaybeDocument } from '../../../src/model/document';
+import { Document, MutableDocument } from '../../../src/model/document';
 import { DocumentKey } from '../../../src/model/document_key';
-import { debugAssert } from '../../../src/util/assert';
 
 /**
  * A wrapper around a RemoteDocumentCache that automatically creates a
@@ -48,7 +45,7 @@ export class TestRemoteDocumentCache {
    * sync.
    */
   addEntries(
-    maybeDocuments: MaybeDocument[],
+    documents: MutableDocument[],
     readTime: SnapshotVersion
   ): Promise<void> {
     return this.persistence.runTransaction(
@@ -56,13 +53,11 @@ export class TestRemoteDocumentCache {
       'readwrite-primary',
       txn => {
         const changeBuffer = this.newChangeBuffer();
-        return PersistencePromise.forEach(
-          maybeDocuments,
-          (maybeDocument: MaybeDocument) =>
-            changeBuffer.getEntry(txn, maybeDocument.key).next(() => {})
+        return PersistencePromise.forEach(documents, (document: Document) =>
+          changeBuffer.getEntry(txn, document.key).next(() => {})
         ).next(() => {
-          for (const maybeDocument of maybeDocuments) {
-            changeBuffer.addEntry(maybeDocument, readTime);
+          for (const document of documents) {
+            changeBuffer.addEntry(document, readTime);
           }
           return changeBuffer.apply(txn);
         });
@@ -74,8 +69,8 @@ export class TestRemoteDocumentCache {
    * Adds a single document using the document's version as its read time.
    * Reads the document first to track the document size internally.
    */
-  addEntry(maybeDocument: MaybeDocument): Promise<void> {
-    return this.addEntries([maybeDocument], maybeDocument.version);
+  addEntry(document: MutableDocument): Promise<void> {
+    return this.addEntries([document], document.version);
   }
 
   removeEntry(
@@ -97,13 +92,13 @@ export class TestRemoteDocumentCache {
     );
   }
 
-  getEntry(documentKey: DocumentKey): Promise<MaybeDocument | null> {
+  getEntry(documentKey: DocumentKey): Promise<MutableDocument> {
     return this.persistence.runTransaction('getEntry', 'readonly', txn => {
       return this.cache.getEntry(txn, documentKey);
     });
   }
 
-  getEntries(documentKeys: DocumentKeySet): Promise<NullableMaybeDocumentMap> {
+  getEntries(documentKeys: DocumentKeySet): Promise<MutableDocumentMap> {
     return this.persistence.runTransaction('getEntries', 'readonly', txn => {
       return this.cache.getEntries(txn, documentKeys);
     });
@@ -112,7 +107,7 @@ export class TestRemoteDocumentCache {
   getDocumentsMatchingQuery(
     query: Query,
     sinceReadTime: SnapshotVersion
-  ): Promise<DocumentMap> {
+  ): Promise<MutableDocumentMap> {
     return this.persistence.runTransaction(
       'getDocumentsMatchingQuery',
       'readonly',
@@ -125,18 +120,18 @@ export class TestRemoteDocumentCache {
   getNewDocumentChanges(
     sinceReadTime: SnapshotVersion
   ): Promise<{
-    changedDocs: MaybeDocumentMap;
+    changedDocs: MutableDocumentMap;
     readTime: SnapshotVersion;
   }> {
     return this.persistence.runTransaction(
       'getNewDocumentChanges',
       'readonly',
       txn => {
-        debugAssert(
-          this.cache instanceof IndexedDbRemoteDocumentCache,
-          'getNewDocumentChanges() requires IndexedDB'
+        return remoteDocumentCacheGetNewDocumentChanges(
+          this.cache,
+          txn,
+          sinceReadTime
         );
-        return this.cache.getNewDocumentChanges(txn, sinceReadTime);
       }
     );
   }

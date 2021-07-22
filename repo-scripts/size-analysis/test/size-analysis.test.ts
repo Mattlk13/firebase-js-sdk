@@ -199,7 +199,8 @@ describe('extractDeclarations on .d.ts file', () => {
 describe('extractDeclarations on js bundle file', () => {
   let subsetExportsBundleFile: string;
   let extractedDeclarations: MemberList;
-  before(() => {
+  before(function () {
+    this.timeout(120000);
     const start = Date.now();
     const testModuleDtsFile: string = getTestModuleDtsFilePath();
     const map: Map<string, string> = buildMap(
@@ -453,7 +454,7 @@ describe('test writeReportToDirectory helper function', () => {
     fs.mkdirSync(aDir, { recursive: true });
     const aFile = `a-file`;
     const aPathToFile = `${aDir}/${aFile}`;
-    fs.writeFileSync(aPathToFile, fileContent);
+    fs.writeFileSync(aPathToFile, JSON.stringify(fileContent));
     expect(() =>
       writeReportToDirectory(fileContent, aFile, aPathToFile)
     ).to.throw(ErrorCode.OUTPUT_DIRECTORY_REQUIRED);

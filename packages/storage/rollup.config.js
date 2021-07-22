@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2018 Google Inc.
+ * Copyright 2020 Google LLC
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,14 +15,20 @@
  * limitations under the License.
  */
 
-import json from 'rollup-plugin-json';
+import json from '@rollup/plugin-json';
 import typescriptPlugin from 'rollup-plugin-typescript2';
 import typescript from 'typescript';
+import alias from '@rollup/plugin-alias';
 import pkg from './package.json';
+
+const { generateAliasConfig } = require('./rollup.shared');
 
 const deps = Object.keys(
   Object.assign({}, pkg.peerDependencies, pkg.dependencies)
 );
+
+const nodeDeps = [...deps, 'util'];
+
 /**
  * ES5 Builds
  */
@@ -35,13 +41,13 @@ const es5BuildPlugins = [
 
 const es5Builds = [
   {
-    input: 'index.ts',
-    output: [
-      { file: pkg.main, format: 'cjs', sourcemap: true },
-      { file: pkg.module, format: 'es', sourcemap: true }
-    ],
-    plugins: es5BuildPlugins,
-    external: id => deps.some(dep => id === dep || id.startsWith(`${dep}/`))
+    input: './index.ts',
+    output: { file: pkg.module, format: 'es', sourcemap: true },
+    plugins: [alias(generateAliasConfig('browser')), ...es5BuildPlugins],
+    external: id => deps.some(dep => id === dep || id.startsWith(`${dep}/`)),
+    treeshake: {
+      moduleSideEffects: false
+    }
   }
 ];
 
@@ -61,16 +67,36 @@ const es2017BuildPlugins = [
 ];
 
 const es2017Builds = [
+  // Node
   {
-    input: 'index.ts',
+    input: './index.ts',
+    output: {
+      file: pkg.main,
+      format: 'cjs',
+      sourcemap: true
+    },
+    plugins: [alias(generateAliasConfig('node')), ...es2017BuildPlugins],
+    external: id =>
+      nodeDeps.some(dep => id === dep || id.startsWith(`${dep}/`)),
+    treeshake: {
+      moduleSideEffects: false
+    }
+  },
+  // Browser
+  {
+    input: './index.ts',
     output: {
       file: pkg.esm2017,
       format: 'es',
       sourcemap: true
     },
-    plugins: es2017BuildPlugins,
-    external: id => deps.some(dep => id === dep || id.startsWith(`${dep}/`))
+    plugins: [alias(generateAliasConfig('browser')), ...es2017BuildPlugins],
+    external: id => deps.some(dep => id === dep || id.startsWith(`${dep}/`)),
+    treeshake: {
+      moduleSideEffects: false
+    }
   }
 ];
 
+// eslint-disable-next-line import/no-default-export
 export default [...es5Builds, ...es2017Builds];

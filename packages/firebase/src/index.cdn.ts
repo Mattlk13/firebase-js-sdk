@@ -33,12 +33,14 @@ import { name, version } from '../package.json';
 import '../auth';
 import '../database';
 import '../firestore';
+import '../firestore/bundle';
 import '../functions';
 import '../messaging';
 import '../storage';
 import '../performance';
 import '../analytics';
 import '../remote-config';
+import '../app-check';
 
 firebase.registerVersion(name, version, 'cdn');
 

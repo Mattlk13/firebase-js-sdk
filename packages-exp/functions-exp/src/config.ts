@@ -24,31 +24,37 @@ import {
   InstanceFactory
 } from '@firebase/component';
 import { FUNCTIONS_TYPE } from './constants';
+import { AppCheckInternalComponentName } from '@firebase/app-check-interop-types';
 
-export const DEFAULT_REGION = 'us-central1';
+const APP_CHECK_INTERNAL_NAME: AppCheckInternalComponentName =
+  'app-check-internal';
+export function registerFunctions(fetchImpl: typeof fetch): void {
+  const factory: InstanceFactory<'functions-exp'> = (
+    container: ComponentContainer,
+    { instanceIdentifier: regionOrCustomDomain }
+  ) => {
+    // Dependencies
+    const app = container.getProvider('app-exp').getImmediate();
+    const authProvider = container.getProvider('auth-internal');
+    const messagingProvider = container.getProvider('messaging');
+    const appCheckProvider = container.getProvider(APP_CHECK_INTERNAL_NAME);
 
-const factory: InstanceFactory<'functions'> = (
-  container: ComponentContainer,
-  region?: string
-) => {
-  // Dependencies
-  const app = container.getProvider('app-exp').getImmediate();
-  const authProvider = container.getProvider('auth-internal');
-  const messagingProvider = container.getProvider('messaging');
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return new FunctionsService(app, authProvider, messagingProvider, region);
-};
-
-export function registerFunctions(): void {
-  const namespaceExports = {
-    // no-inline
-    Functions: FunctionsService
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return new FunctionsService(
+      app,
+      authProvider,
+      messagingProvider,
+      appCheckProvider,
+      regionOrCustomDomain,
+      fetchImpl
+    );
   };
 
   _registerComponent(
-    new Component(FUNCTIONS_TYPE, factory, ComponentType.PUBLIC)
-      .setServiceProps(namespaceExports)
-      .setMultipleInstances(true)
+    new Component(
+      FUNCTIONS_TYPE,
+      factory,
+      ComponentType.PUBLIC
+    ).setMultipleInstances(true)
   );
 }

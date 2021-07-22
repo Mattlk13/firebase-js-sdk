@@ -16,64 +16,30 @@
  */
 
 import { FieldPath as PublicFieldPath } from '@firebase/firestore-types';
+import { Compat, getModularInstance } from '@firebase/util';
 
+import { FieldPath as ExpFieldPath } from '../../exp/index';
 import { FieldPath as InternalFieldPath } from '../model/path';
-import { Code, FirestoreError } from '../util/error';
-import {
-  invalidClassError,
-  validateArgType,
-  validateNamedArrayAtLeastNumberOfElements
-} from '../util/input_validation';
 
 // The objects that are a part of this API are exposed to third-parties as
 // compiled javascript so we want to flag our private members with a leading
 // underscore to discourage their use.
 
 /**
- * A field class base class that is shared by the lite, full and legacy SDK,
- * which supports shared code that deals with FieldPaths.
+ * A `FieldPath` refers to a field in a document. The path may consist of a
+ * single field name (referring to a top-level field in the document), or a list
+ * of field names (referring to a nested field in the document).
  */
-export abstract class BaseFieldPath {
-  /** Internal representation of a Firestore field path. */
-  readonly _internalPath: InternalFieldPath;
-
-  constructor(fieldNames: string[]) {
-    validateNamedArrayAtLeastNumberOfElements(
-      'FieldPath',
-      fieldNames,
-      'fieldNames',
-      1
-    );
-
-    for (let i = 0; i < fieldNames.length; ++i) {
-      validateArgType('FieldPath', 'string', i, fieldNames[i]);
-      if (fieldNames[i].length === 0) {
-        throw new FirestoreError(
-          Code.INVALID_ARGUMENT,
-          `Invalid field name at argument $(i + 1). ` +
-            'Field names must not be empty.'
-        );
-      }
-    }
-
-    this._internalPath = new InternalFieldPath(fieldNames);
-  }
-}
-
-/**
- * A FieldPath refers to a field in a document. The path may consist of a single
- * field name (referring to a top-level field in the document), or a list of
- * field names (referring to a nested field in the document).
- */
-export class FieldPath extends BaseFieldPath implements PublicFieldPath {
+export class FieldPath implements PublicFieldPath, Compat<ExpFieldPath> {
+  readonly _delegate: ExpFieldPath;
   /**
    * Creates a FieldPath from the provided field names. If more than one field
    * name is provided, the path will point to a nested field in a document.
    *
-   * @param fieldNames A list of field names.
+   * @param fieldNames - A list of field names.
    */
   constructor(...fieldNames: string[]) {
-    super(fieldNames);
+    this._delegate = new ExpFieldPath(...fieldNames);
   }
 
   static documentId(): FieldPath {
@@ -87,37 +53,11 @@ export class FieldPath extends BaseFieldPath implements PublicFieldPath {
   }
 
   isEqual(other: PublicFieldPath): boolean {
-    if (!(other instanceof FieldPath)) {
-      throw invalidClassError('isEqual', 'FieldPath', 1, other);
+    other = getModularInstance(other);
+
+    if (!(other instanceof ExpFieldPath)) {
+      return false;
     }
-    return this._internalPath.isEqual(other._internalPath);
-  }
-}
-
-/**
- * Matches any characters in a field path string that are reserved.
- */
-const RESERVED = new RegExp('[~\\*/\\[\\]]');
-
-/**
- * Parses a field path string into a FieldPath, treating dots as separators.
- */
-export function fromDotSeparatedString(path: string): FieldPath {
-  const found = path.search(RESERVED);
-  if (found >= 0) {
-    throw new FirestoreError(
-      Code.INVALID_ARGUMENT,
-      `Invalid field path (${path}). Paths must not contain ` +
-        `'~', '*', '/', '[', or ']'`
-    );
-  }
-  try {
-    return new FieldPath(...path.split('.'));
-  } catch (e) {
-    throw new FirestoreError(
-      Code.INVALID_ARGUMENT,
-      `Invalid field path (${path}). Paths must not be empty, ` +
-        `begin with '.', end with '.', or contain '..'`
-    );
+    return this._delegate._internalPath.isEqual(other._internalPath);
   }
 }

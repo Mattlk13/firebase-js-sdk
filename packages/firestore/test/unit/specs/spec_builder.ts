@@ -15,39 +15,43 @@
  * limitations under the License.
  */
 
+import { UserDataWriter } from '../../../src/api/database';
 import {
-  FieldFilter,
+  hasLimitToFirst,
+  hasLimitToLast,
+  newQueryForPath,
   Query,
   queryEquals,
-  Filter,
-  newQueryForPath,
   queryToTarget
 } from '../../../src/core/query';
-import { canonifyTarget, Target, targetEquals } from '../../../src/core/target';
+import {
+  canonifyTarget,
+  FieldFilter,
+  Filter,
+  Target,
+  targetEquals
+} from '../../../src/core/target';
 import { TargetIdGenerator } from '../../../src/core/target_id_generator';
 import { TargetId } from '../../../src/core/types';
-import {
-  Document,
-  MaybeDocument,
-  NoDocument
-} from '../../../src/model/document';
+import { Document } from '../../../src/model/document';
 import { DocumentKey } from '../../../src/model/document_key';
 import { JsonObject } from '../../../src/model/object_value';
+import { ResourcePath } from '../../../src/model/path';
 import {
   isPermanentWriteError,
   mapCodeFromRpcCode,
   mapRpcCodeFromCode
 } from '../../../src/remote/rpc_error';
 import { debugAssert, fail } from '../../../src/util/assert';
-
+import { TimerId } from '../../../src/util/async_queue';
 import { Code } from '../../../src/util/error';
 import { forEach } from '../../../src/util/obj';
-import { isNullOrUndefined } from '../../../src/util/types';
-import { TestSnapshotVersion, testUserDataWriter } from '../../util/helpers';
-
-import { TimerId } from '../../../src/util/async_queue';
-import { RpcError } from './spec_rpc_error';
 import { ObjectMap } from '../../../src/util/obj_map';
+import { isNullOrUndefined } from '../../../src/util/types';
+import { firestore } from '../../util/api_helpers';
+import { TestSnapshotVersion } from '../../util/helpers';
+
+import { RpcError } from './spec_rpc_error';
 import {
   parseQuery,
   PersistenceAction,
@@ -63,7 +67,7 @@ import {
   SpecWriteFailure
 } from './spec_test_runner';
 
-const userDataWriter = testUserDataWriter();
+const userDataWriter = new UserDataWriter(firestore());
 
 // These types are used in a protected API by SpecBuilder and need to be
 // exported.
@@ -73,7 +77,8 @@ export interface LimboMap {
 
 export interface ActiveTargetSpec {
   queries: SpecQuery[];
-  resumeToken: string;
+  resumeToken?: string;
+  readTime?: TestSnapshotVersion;
 }
 
 export interface ActiveTargetMap {
@@ -253,7 +258,10 @@ export class SpecBuilder {
     return this;
   }
 
-  userListens(query: Query, resumeToken?: string): this {
+  userListens(
+    query: Query,
+    resume?: { resumeToken?: string; readTime?: TestSnapshotVersion }
+  ): this {
     this.nextStep();
 
     const target = queryToTarget(query);
@@ -262,7 +270,7 @@ export class SpecBuilder {
     if (this.injectFailures) {
       // Return a `userListens()` step but don't advance the target IDs.
       this.currentStep = {
-        userListen: [targetId, SpecBuilder.queryToSpec(query)]
+        userListen: { targetId, query: SpecBuilder.queryToSpec(query) }
       };
     } else {
       if (this.queryMapping.has(target)) {
@@ -272,9 +280,14 @@ export class SpecBuilder {
       }
 
       this.queryMapping.set(target, targetId);
-      this.addQueryToActiveTargets(targetId, query, resumeToken);
+      this.addQueryToActiveTargets(
+        targetId,
+        query,
+        resume?.resumeToken,
+        resume?.readTime
+      );
       this.currentStep = {
-        userListen: [targetId, SpecBuilder.queryToSpec(query)],
+        userListen: { targetId, query: SpecBuilder.queryToSpec(query) },
         expectedState: { activeTargets: { ...this.activeTargets } }
       };
     }
@@ -358,6 +371,18 @@ export class SpecBuilder {
     this.currentStep = {
       removeSnapshotsInSyncListener: true
     };
+    return this;
+  }
+
+  loadBundle(bundleContent: string): this {
+    this.nextStep();
+    this.currentStep = {
+      loadBundle: bundleContent
+    };
+    // Loading a bundle implicitly creates a new target. We advance the `queryIdGenerator` to match.
+    this.queryIdGenerator.next(
+      queryToTarget(newQueryForPath(ResourcePath.emptyPath()))
+    );
     return this;
   }
 
@@ -485,13 +510,22 @@ export class SpecBuilder {
 
   /** Overrides the currently expected set of active targets. */
   expectActiveTargets(
-    ...targets: Array<{ query: Query; resumeToken?: string }>
+    ...targets: Array<{
+      query: Query;
+      resumeToken?: string;
+      readTime?: TestSnapshotVersion;
+    }>
   ): this {
     this.assertStep('Active target expectation requires previous step');
     const currentStep = this.currentStep!;
     this.clientState.activeTargets = {};
-    targets.forEach(({ query, resumeToken }) => {
-      this.addQueryToActiveTargets(this.getTargetId(query), query, resumeToken);
+    targets.forEach(({ query, resumeToken, readTime }) => {
+      this.addQueryToActiveTargets(
+        this.getTargetId(query),
+        query,
+        resumeToken,
+        readTime
+      );
     });
     currentStep.expectedState = currentStep.expectedState || {};
     currentStep.expectedState.activeTargets = { ...this.activeTargets };
@@ -555,12 +589,12 @@ export class SpecBuilder {
    * with no document for NoDocument. This is translated into normal watch
    * messages.
    */
-  ackLimbo(version: TestSnapshotVersion, doc: Document | NoDocument): this {
+  ackLimbo(version: TestSnapshotVersion, doc: Document): this {
     const query = newQueryForPath(doc.key.path);
     this.watchAcks(query);
-    if (doc instanceof Document) {
+    if (doc.isFoundDocument()) {
       this.watchSends({ affects: [query] }, doc);
-    } else if (doc instanceof NoDocument) {
+    } else if (doc.isNoDocument()) {
       // Don't send any updates
     } else {
       fail('Unknown parameter: ' + doc);
@@ -575,7 +609,7 @@ export class SpecBuilder {
    * with either a document or with no document for NoDocument. This is
    * translated into normal watch messages.
    */
-  watchRemovesLimboTarget(doc: Document | NoDocument): this {
+  watchRemovesLimboTarget(doc: Document): this {
     const query = newQueryForPath(doc.key.path);
     this.watchRemoves(query);
     return this;
@@ -681,7 +715,7 @@ export class SpecBuilder {
 
   watchSends(
     targets: { affects?: Query[]; removed?: Query[] },
-    ...docs: MaybeDocument[]
+    ...docs: Document[]
   ): this {
     this.nextStep();
     const affects =
@@ -791,6 +825,14 @@ export class SpecBuilder {
     return this;
   }
 
+  waitForPendingWrites(): this {
+    this.nextStep();
+    this.currentStep = {
+      waitForPendingWrites: true
+    };
+    return this;
+  }
+
   expectUserCallbacks(docs: {
     acknowledged?: string[];
     rejected?: string[];
@@ -852,14 +894,22 @@ export class SpecBuilder {
   }
 
   /** Registers a query that is active in another tab. */
-  expectListen(query: Query, resumeToken?: string): this {
+  expectListen(
+    query: Query,
+    resume?: { resumeToken?: string; readTime?: TestSnapshotVersion }
+  ): this {
     this.assertStep('Expectations require previous step');
 
     const target = queryToTarget(query);
     const targetId = this.queryIdGenerator.cachedId(target);
     this.queryMapping.set(target, targetId);
 
-    this.addQueryToActiveTargets(targetId, query, resumeToken);
+    this.addQueryToActiveTargets(
+      targetId,
+      query,
+      resume?.resumeToken,
+      resume?.readTime
+    );
 
     const currentStep = this.currentStep!;
     currentStep.expectedState = currentStep.expectedState || {};
@@ -942,17 +992,24 @@ export class SpecBuilder {
     return this;
   }
 
+  expectWaitForPendingWritesEvent(count = 1): this {
+    this.assertStep('Expectations require previous step');
+    const currentStep = this.currentStep!;
+    currentStep.expectedWaitForPendingWritesEvents = count;
+    return this;
+  }
+
   private static queryToSpec(query: Query): SpecQuery {
     // TODO(dimond): full query support
     const spec: SpecQuery = { path: query.path.canonicalString() };
     if (query.collectionGroup !== null) {
       spec.collectionGroup = query.collectionGroup;
     }
-    if (query.hasLimitToFirst()) {
+    if (hasLimitToFirst(query)) {
       spec.limit = query.limit!;
       spec.limitType = 'LimitToFirst';
     }
-    if (query.hasLimitToLast()) {
+    if (hasLimitToLast(query)) {
       spec.limit = query.limit!;
       spec.limitType = 'LimitToLast';
     }
@@ -981,14 +1038,14 @@ export class SpecBuilder {
     return spec;
   }
 
-  private static docToSpec(doc: MaybeDocument): SpecDocument {
-    if (doc instanceof Document) {
+  private static docToSpec(doc: Document): SpecDocument {
+    if (doc.isFoundDocument()) {
       return {
         key: SpecBuilder.keyToSpec(doc.key),
         version: doc.version.toMicroseconds(),
-        value: userDataWriter.convertValue(doc.toProto()) as JsonObject<
-          unknown
-        >,
+        value: userDataWriter.convertValue(
+          doc.data.value
+        ) as JsonObject<unknown>,
         options: {
           hasLocalMutations: doc.hasLocalMutations,
           hasCommittedMutations: doc.hasCommittedMutations
@@ -1021,7 +1078,8 @@ export class SpecBuilder {
   private addQueryToActiveTargets(
     targetId: number,
     query: Query,
-    resumeToken?: string
+    resumeToken?: string,
+    readTime?: TestSnapshotVersion
   ): void {
     if (this.activeTargets[targetId]) {
       const activeQueries = this.activeTargets[targetId].queries;
@@ -1033,18 +1091,21 @@ export class SpecBuilder {
         // `query` is not added yet.
         this.activeTargets[targetId] = {
           queries: [SpecBuilder.queryToSpec(query), ...activeQueries],
-          resumeToken: resumeToken || ''
+          resumeToken: resumeToken || '',
+          readTime
         };
       } else {
         this.activeTargets[targetId] = {
           queries: activeQueries,
-          resumeToken: resumeToken || ''
+          resumeToken: resumeToken || '',
+          readTime
         };
       }
     } else {
       this.activeTargets[targetId] = {
         queries: [SpecBuilder.queryToSpec(query)],
-        resumeToken: resumeToken || ''
+        resumeToken: resumeToken || '',
+        readTime
       };
     }
   }

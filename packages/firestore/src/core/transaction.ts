@@ -15,9 +15,8 @@
  * limitations under the License.
  */
 
-import { ParsedSetData, ParsedUpdateData } from '../api/user_data_reader';
-import { Document, MaybeDocument, NoDocument } from '../model/document';
-
+import { ParsedSetData, ParsedUpdateData } from '../lite/user_data_reader';
+import { Document } from '../model/document';
 import { DocumentKey } from '../model/document_key';
 import {
   DeleteMutation,
@@ -32,6 +31,7 @@ import {
 } from '../remote/datastore';
 import { fail, debugAssert } from '../util/assert';
 import { Code, FirestoreError } from '../util/error';
+
 import { SnapshotVersion } from './snapshot_version';
 
 /**
@@ -60,7 +60,7 @@ export class Transaction {
 
   constructor(private datastore: Datastore) {}
 
-  async lookup(keys: DocumentKey[]): Promise<MaybeDocument[]> {
+  async lookup(keys: DocumentKey[]): Promise<Document[]> {
     this.ensureCommitNotCalled();
 
     if (this.mutations.length > 0) {
@@ -70,24 +70,18 @@ export class Transaction {
       );
     }
     const docs = await invokeBatchGetDocumentsRpc(this.datastore, keys);
-    docs.forEach(doc => {
-      if (doc instanceof NoDocument || doc instanceof Document) {
-        this.recordVersion(doc);
-      } else {
-        fail('Document in a transaction was a ' + doc.constructor.name);
-      }
-    });
+    docs.forEach(doc => this.recordVersion(doc));
     return docs;
   }
 
   set(key: DocumentKey, data: ParsedSetData): void {
-    this.write(data.toMutations(key, this.precondition(key)));
+    this.write(data.toMutation(key, this.precondition(key)));
     this.writtenDocs.add(key.toString());
   }
 
   update(key: DocumentKey, data: ParsedUpdateData): void {
     try {
-      this.write(data.toMutations(key, this.preconditionForUpdate(key)));
+      this.write(data.toMutation(key, this.preconditionForUpdate(key)));
     } catch (e) {
       this.lastWriteError = e;
     }
@@ -95,7 +89,7 @@ export class Transaction {
   }
 
   delete(key: DocumentKey): void {
-    this.write([new DeleteMutation(key, this.precondition(key))]);
+    this.write(new DeleteMutation(key, this.precondition(key)));
     this.writtenDocs.add(key.toString());
   }
 
@@ -120,12 +114,12 @@ export class Transaction {
     this.committed = true;
   }
 
-  private recordVersion(doc: MaybeDocument): void {
+  private recordVersion(doc: Document): void {
     let docVersion: SnapshotVersion;
 
-    if (doc instanceof Document) {
+    if (doc.isFoundDocument()) {
       docVersion = doc.version;
-    } else if (doc instanceof NoDocument) {
+    } else if (doc.isNoDocument()) {
       // For deleted docs, we must use baseVersion 0 when we overwrite them.
       docVersion = SnapshotVersion.min();
     } else {
@@ -193,9 +187,9 @@ export class Transaction {
     }
   }
 
-  private write(mutations: Mutation[]): void {
+  private write(mutation: Mutation): void {
     this.ensureCommitNotCalled();
-    this.mutations = this.mutations.concat(mutations);
+    this.mutations.push(mutation);
   }
 
   private ensureCommitNotCalled(): void {

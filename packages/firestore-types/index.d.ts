@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-import { FirebaseApp, FirebaseNamespace } from '@firebase/app-types';
+import { EmulatorMockTokenOptions } from '@firebase/util';
 
 export type DocumentData = { [field: string]: any };
 
@@ -26,9 +26,9 @@ export const CACHE_SIZE_UNLIMITED: number;
 export interface Settings {
   host?: string;
   ssl?: boolean;
-  timestampsInSnapshots?: boolean;
   cacheSizeBytes?: number;
   experimentalForceLongPolling?: boolean;
+  experimentalAutoDetectLongPolling?: boolean;
   ignoreUndefinedProperties?: boolean;
   merge?: boolean;
 }
@@ -61,6 +61,14 @@ export class FirebaseFirestore {
 
   settings(settings: Settings): void;
 
+  useEmulator(
+    host: string,
+    port: number,
+    options?: {
+      mockUserToken?: EmulatorMockTokenOptions;
+    }
+  ): void;
+
   enablePersistence(settings?: PersistenceSettings): Promise<void>;
 
   collection(collectionPath: string): CollectionReference<DocumentData>;
@@ -87,15 +95,48 @@ export class FirebaseFirestore {
 
   onSnapshotsInSync(observer: {
     next?: (value: void) => void;
-    error?: (error: Error) => void;
+    error?: (error: FirestoreError) => void;
     complete?: () => void;
   }): () => void;
   onSnapshotsInSync(onSync: () => void): () => void;
 
   terminate(): Promise<void>;
 
+  loadBundle(
+    bundleData: ArrayBuffer | ReadableStream<Uint8Array> | string
+  ): LoadBundleTask;
+
+  namedQuery(name: string): Promise<Query<DocumentData> | null>;
+
   INTERNAL: { delete: () => Promise<void> };
 }
+
+export interface LoadBundleTask extends PromiseLike<LoadBundleTaskProgress> {
+  onProgress(
+    next?: (progress: LoadBundleTaskProgress) => any,
+    error?: (error: Error) => any,
+    complete?: () => void
+  ): void;
+
+  then<T, R>(
+    onFulfilled?: (a: LoadBundleTaskProgress) => T | PromiseLike<T>,
+    onRejected?: (a: Error) => R | PromiseLike<R>
+  ): Promise<T | R>;
+
+  catch<R>(
+    onRejected: (a: Error) => R | PromiseLike<R>
+  ): Promise<R | LoadBundleTaskProgress>;
+}
+
+export interface LoadBundleTaskProgress {
+  documentsLoaded: number;
+  totalDocuments: number;
+  bytesLoaded: number;
+  totalBytes: number;
+  taskState: TaskState;
+}
+
+export type TaskState = 'Error' | 'Running' | 'Success';
 
 export class GeoPoint {
   constructor(latitude: number, longitude: number);
@@ -235,22 +276,23 @@ export class DocumentReference<T = DocumentData> {
     options: SnapshotListenOptions,
     observer: {
       next?: (snapshot: DocumentSnapshot<T>) => void;
-      error?: (error: Error) => void;
+      error?: (error: FirestoreError) => void;
       complete?: () => void;
     }
   ): () => void;
   onSnapshot(
     onNext: (snapshot: DocumentSnapshot<T>) => void,
-    onError?: (error: Error) => void,
+    onError?: (error: FirestoreError) => void,
     onCompletion?: () => void
   ): () => void;
   onSnapshot(
     options: SnapshotListenOptions,
     onNext: (snapshot: DocumentSnapshot<T>) => void,
-    onError?: (error: Error) => void,
+    onError?: (error: FirestoreError) => void,
     onCompletion?: () => void
   ): () => void;
 
+  withConverter(converter: null): DocumentReference<DocumentData>;
   withConverter<U>(converter: FirestoreDataConverter<U>): DocumentReference<U>;
 }
 
@@ -280,9 +322,9 @@ export class DocumentSnapshot<T = DocumentData> {
   isEqual(other: DocumentSnapshot<T>): boolean;
 }
 
-export class QueryDocumentSnapshot<T = DocumentData> extends DocumentSnapshot<
-  T
-> {
+export class QueryDocumentSnapshot<
+  T = DocumentData
+> extends DocumentSnapshot<T> {
   private constructor();
 
   data(options?: SnapshotOptions): T;
@@ -294,11 +336,13 @@ export type WhereFilterOp =
   | '<'
   | '<='
   | '=='
+  | '!='
   | '>='
   | '>'
   | 'array-contains'
   | 'in'
-  | 'array-contains-any';
+  | 'array-contains-any'
+  | 'not-in';
 
 export class Query<T = DocumentData> {
   protected constructor();
@@ -338,29 +382,30 @@ export class Query<T = DocumentData> {
 
   onSnapshot(observer: {
     next?: (snapshot: QuerySnapshot<T>) => void;
-    error?: (error: Error) => void;
+    error?: (error: FirestoreError) => void;
     complete?: () => void;
   }): () => void;
   onSnapshot(
     options: SnapshotListenOptions,
     observer: {
       next?: (snapshot: QuerySnapshot<T>) => void;
-      error?: (error: Error) => void;
+      error?: (error: FirestoreError) => void;
       complete?: () => void;
     }
   ): () => void;
   onSnapshot(
     onNext: (snapshot: QuerySnapshot<T>) => void,
-    onError?: (error: Error) => void,
+    onError?: (error: FirestoreError) => void,
     onCompletion?: () => void
   ): () => void;
   onSnapshot(
     options: SnapshotListenOptions,
     onNext: (snapshot: QuerySnapshot<T>) => void,
-    onError?: (error: Error) => void,
+    onError?: (error: FirestoreError) => void,
     onCompletion?: () => void
   ): () => void;
 
+  withConverter(converter: null): Query<DocumentData>;
   withConverter<U>(converter: FirestoreDataConverter<U>): Query<U>;
 }
 
@@ -405,6 +450,7 @@ export class CollectionReference<T = DocumentData> extends Query<T> {
 
   isEqual(other: CollectionReference<T>): boolean;
 
+  withConverter(converter: null): CollectionReference<DocumentData>;
   withConverter<U>(
     converter: FirestoreDataConverter<U>
   ): CollectionReference<U>;

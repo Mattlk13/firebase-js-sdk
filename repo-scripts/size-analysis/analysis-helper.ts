@@ -21,8 +21,8 @@ import * as fs from 'fs';
 import * as rollup from 'rollup';
 import * as terser from 'terser';
 import * as ts from 'typescript';
-import resolve from 'rollup-plugin-node-resolve';
-import commonjs from 'rollup-plugin-commonjs';
+import resolve from '@rollup/plugin-node-resolve';
+import commonjs from '@rollup/plugin-commonjs';
 import { deepCopy } from '@firebase/util';
 
 export const enum ErrorCode {
@@ -96,7 +96,8 @@ export async function extractDependenciesAndSize(
   });
   const externalDepsNotResolvedBundle = await rollup.rollup({
     input,
-    external: id => id.startsWith('@firebase') // exclude all firebase dependencies
+    // exclude all firebase dependencies and tslib
+    external: id => id.startsWith('@firebase') || id === 'tslib'
   });
   await externalDepsNotResolvedBundle.write({
     file: externalDepsNotResolvedOutput,
@@ -116,20 +117,20 @@ export async function extractDependenciesAndSize(
     externalDepsNotResolvedOutput,
     'utf-8'
   );
-  const externalDepsResolvedOutputContentMinimized: terser.MinifyOutput = terser.minify(
+  const externalDepsResolvedOutputContentMinimized = await terser.minify(
     externalDepsResolvedOutputContent,
     {
-      output: {
+      format: {
         comments: false
       },
       mangle: { toplevel: true },
       compress: false
     }
   );
-  const externalDepsNotResolvedOutputContentMinimized: terser.MinifyOutput = terser.minify(
+  const externalDepsNotResolvedOutputContentMinimized = await terser.minify(
     externalDepsNotResolvedOutputContent,
     {
-      output: {
+      format: {
         comments: false
       },
       mangle: { toplevel: true },
@@ -224,7 +225,14 @@ export function extractDeclarations(
     } else if (ts.isVariableDeclaration(node)) {
       declarations.variables.push(node.name!.getText());
     } else if (ts.isEnumDeclaration(node)) {
-      declarations.enums.push(node.name.escapedText.toString());
+      // `const enum`s should not be analyzed. They do not add to bundle size and
+      // creating a file that imports them causes an error during the rollup step.
+      if (
+        // Identifies if this enum had a "const" modifier attached.
+        !node.modifiers?.some(mod => mod.kind === ts.SyntaxKind.ConstKeyword)
+      ) {
+        declarations.enums.push(node.name.escapedText.toString());
+      }
     } else if (ts.isVariableStatement(node)) {
       const variableDeclarations = node.declarationList.declarations;
 
@@ -238,9 +246,8 @@ export function extractDeclarations(
         }
         // Binding Pattern Example: export const {a, b} = {a: 1, b: 1};
         else {
-          const elements = variableDeclaration.name.elements as ts.NodeArray<
-            ts.BindingElement
-          >;
+          const elements = variableDeclaration.name
+            .elements as ts.NodeArray<ts.BindingElement>;
           elements.forEach((node: ts.BindingElement) => {
             declarations.variables.push(node.name.getText(sourceFile));
           });
@@ -801,6 +808,7 @@ export function buildMap(api: MemberList): Map<string, string> {
  */
 async function traverseDirs(
   moduleLocation: string,
+  // eslint-disable-next-line @typescript-eslint/ban-types
   executor: Function,
   level: number,
   levelLimit: number
@@ -859,19 +867,35 @@ export async function buildJsonReport(
     name: moduleName,
     symbols: []
   };
-
   for (const exp of publicApi.classes) {
-    result.symbols.push(await extractDependenciesAndSize(exp, jsFile, map));
+    try {
+      result.symbols.push(await extractDependenciesAndSize(exp, jsFile, map));
+    } catch (e) {
+      console.log(e);
+    }
   }
+
   for (const exp of publicApi.functions) {
-    result.symbols.push(await extractDependenciesAndSize(exp, jsFile, map));
+    try {
+      result.symbols.push(await extractDependenciesAndSize(exp, jsFile, map));
+    } catch (e) {
+      console.log(e);
+    }
   }
   for (const exp of publicApi.variables) {
-    result.symbols.push(await extractDependenciesAndSize(exp, jsFile, map));
+    try {
+      result.symbols.push(await extractDependenciesAndSize(exp, jsFile, map));
+    } catch (e) {
+      console.log(e);
+    }
   }
 
   for (const exp of publicApi.enums) {
-    result.symbols.push(await extractDependenciesAndSize(exp, jsFile, map));
+    try {
+      result.symbols.push(await extractDependenciesAndSize(exp, jsFile, map));
+    } catch (e) {
+      console.log(e);
+    }
   }
   return result;
 }

@@ -16,48 +16,49 @@
  */
 
 import {
-  contains,
-  isEmpty,
-  safeGet,
-  CONSTANTS,
-  stringify,
   assert,
-  isAdmin,
-  isValidFormat,
+  contains,
+  Deferred,
+  isEmpty,
   isMobileCordova,
+  isNodeSdk,
   isReactNative,
-  isNodeSdk
+  isValidFormat,
+  safeGet,
+  stringify,
+  isAdmin
 } from '@firebase/util';
-
-import { error, log, logWrapper, warn, ObjectToUniqueKey } from './util/util';
-import { Path } from './util/Path';
-import { VisibilityMonitor } from './util/VisibilityMonitor';
-import { OnlineMonitor } from './util/OnlineMonitor';
 
 import { Connection } from '../realtime/Connection';
 
-import { ServerActions } from './ServerActions';
+import { AppCheckTokenProvider } from './AppCheckTokenProvider';
 import { AuthTokenProvider } from './AuthTokenProvider';
 import { RepoInfo } from './RepoInfo';
-import { Query } from '../api/Query';
+import { ServerActions } from './ServerActions';
+import { OnlineMonitor } from './util/OnlineMonitor';
+import { Path } from './util/Path';
+import { error, log, logWrapper, warn, ObjectToUniqueKey } from './util/util';
+import { VisibilityMonitor } from './util/VisibilityMonitor';
 import { SDK_VERSION } from './version';
+import { QueryContext } from './view/EventRegistration';
 
 const RECONNECT_MIN_DELAY = 1000;
 const RECONNECT_MAX_DELAY_DEFAULT = 60 * 5 * 1000; // 5 minutes in milliseconds (Case: 1858)
+const GET_CONNECT_TIMEOUT = 3 * 1000;
 const RECONNECT_MAX_DELAY_FOR_ADMINS = 30 * 1000; // 30 seconds for admin clients (likely to be a backend server)
 const RECONNECT_DELAY_MULTIPLIER = 1.3;
 const RECONNECT_DELAY_RESET_TIMEOUT = 30000; // Reset delay back to MIN_DELAY after being connected for 30sec.
 const SERVER_KILL_INTERRUPT_REASON = 'server_kill';
 
 // If auth fails repeatedly, we'll assume something is wrong and log a warning / back off.
-const INVALID_AUTH_TOKEN_THRESHOLD = 3;
+const INVALID_TOKEN_THRESHOLD = 3;
 
 interface ListenSpec {
   onComplete(s: string, p?: unknown): void;
 
   hashFn(): string;
 
-  query: Query;
+  query: QueryContext;
   tag: number | null;
 }
 
@@ -75,6 +76,11 @@ interface OutstandingPut {
   onComplete: (a: string, b?: string) => void;
 }
 
+interface OutstandingGet {
+  request: object;
+  onComplete: (response: { [k: string]: unknown }) => void;
+}
+
 /**
  * Firebase connection.  Abstracts wire protocol and handles reconnecting.
  *
@@ -87,13 +93,14 @@ export class PersistentConnection extends ServerActions {
   private log_ = logWrapper('p:' + this.id + ':');
 
   private interruptReasons_: { [reason: string]: boolean } = {};
-  /** Map<path, Map<queryId, ListenSpec>> */
   private readonly listens: Map<
     /* path */ string,
     Map</* queryId */ string, ListenSpec>
   > = new Map();
   private outstandingPuts_: OutstandingPut[] = [];
+  private outstandingGets_: OutstandingGet[] = [];
   private outstandingPutCount_ = 0;
+  private outstandingGetCount_ = 0;
   private onDisconnectRequestQueue_: OnDisconnectRequest[] = [];
   private connected_ = false;
   private reconnectDelay_ = RECONNECT_MIN_DELAY;
@@ -115,8 +122,10 @@ export class PersistentConnection extends ServerActions {
   } | null = null;
 
   private authToken_: string | null = null;
+  private appCheckToken_: string | null = null;
   private forceTokenRefresh_ = false;
   private invalidAuthTokenCount_ = 0;
+  private invalidAppCheckTokenCount_ = 0;
 
   private firstConnection_ = true;
   private lastConnectionAttemptTime_: number | null = null;
@@ -130,10 +139,9 @@ export class PersistentConnection extends ServerActions {
   private static nextConnectionId_ = 0;
 
   /**
-   * @implements {ServerActions}
-   * @param repoInfo_ Data about the namespace we are connecting to
-   * @param applicationId_ The Firebase App ID for this project
-   * @param onDataUpdate_ A callback for new data from the server
+   * @param repoInfo_ - Data about the namespace we are connecting to
+   * @param applicationId_ - The Firebase App ID for this project
+   * @param onDataUpdate_ - A callback for new data from the server
    */
   constructor(
     private repoInfo_: RepoInfo,
@@ -147,6 +155,7 @@ export class PersistentConnection extends ServerActions {
     private onConnectStatus_: (a: boolean) => void,
     private onServerInfoUpdate_: (a: unknown) => void,
     private authTokenProvider_: AuthTokenProvider,
+    private appCheckTokenProvider_: AppCheckTokenProvider,
     private authOverride_?: object | null
   ) {
     super();
@@ -156,7 +165,6 @@ export class PersistentConnection extends ServerActions {
         'Auth override specified in options, but not supported on non Node.js platforms'
       );
     }
-    this.scheduleConnect_(0);
 
     VisibilityMonitor.getInstance().on('visible', this.onVisible_, this);
 
@@ -184,24 +192,75 @@ export class PersistentConnection extends ServerActions {
     }
   }
 
-  /**
-   * @inheritDoc
-   */
+  get(query: QueryContext): Promise<string> {
+    this.initConnection_();
+
+    const deferred = new Deferred<string>();
+    const request = {
+      p: query._path.toString(),
+      q: query._queryObject
+    };
+    const outstandingGet = {
+      action: 'g',
+      request,
+      onComplete: (message: { [k: string]: unknown }) => {
+        const payload = message['d'] as string;
+        if (message['s'] === 'ok') {
+          this.onDataUpdate_(
+            request['p'],
+            payload,
+            /*isMerge*/ false,
+            /*tag*/ null
+          );
+          deferred.resolve(payload);
+        } else {
+          deferred.reject(payload);
+        }
+      }
+    };
+    this.outstandingGets_.push(outstandingGet);
+    this.outstandingGetCount_++;
+    const index = this.outstandingGets_.length - 1;
+
+    if (!this.connected_) {
+      setTimeout(() => {
+        const get = this.outstandingGets_[index];
+        if (get === undefined || outstandingGet !== get) {
+          return;
+        }
+        delete this.outstandingGets_[index];
+        this.outstandingGetCount_--;
+        if (this.outstandingGetCount_ === 0) {
+          this.outstandingGets_ = [];
+        }
+        this.log_('get ' + index + ' timed out on connection');
+        deferred.reject(new Error('Client is offline.'));
+      }, GET_CONNECT_TIMEOUT);
+    }
+
+    if (this.connected_) {
+      this.sendGet_(index);
+    }
+
+    return deferred.promise;
+  }
+
   listen(
-    query: Query,
+    query: QueryContext,
     currentHashFn: () => string,
     tag: number | null,
     onComplete: (a: string, b: unknown) => void
   ) {
-    const queryId = query.queryIdentifier();
-    const pathString = query.path.toString();
+    this.initConnection_();
+
+    const queryId = query._queryIdentifier;
+    const pathString = query._path.toString();
     this.log_('Listen called for ' + pathString + ' ' + queryId);
     if (!this.listens.has(pathString)) {
       this.listens.set(pathString, new Map());
     }
     assert(
-      query.getQueryParams().isDefault() ||
-        !query.getQueryParams().loadsAllData(),
+      query._queryParams.isDefault() || !query._queryParams.loadsAllData(),
       'listen() called for non-default but complete query'
     );
     assert(
@@ -221,10 +280,24 @@ export class PersistentConnection extends ServerActions {
     }
   }
 
+  private sendGet_(index: number) {
+    const get = this.outstandingGets_[index];
+    this.sendRequest('g', get.request, (message: { [k: string]: unknown }) => {
+      delete this.outstandingGets_[index];
+      this.outstandingGetCount_--;
+      if (this.outstandingGetCount_ === 0) {
+        this.outstandingGets_ = [];
+      }
+      if (get.onComplete) {
+        get.onComplete(message);
+      }
+    });
+  }
+
   private sendListen_(listenSpec: ListenSpec) {
     const query = listenSpec.query;
-    const pathString = query.path.toString();
-    const queryId = query.queryIdentifier();
+    const pathString = query._path.toString();
+    const queryId = query._queryIdentifier;
     this.log_('Listen on ' + pathString + ' for ' + queryId);
     const req: { [k: string]: unknown } = { /*path*/ p: pathString };
 
@@ -232,7 +305,7 @@ export class PersistentConnection extends ServerActions {
 
     // Only bother to send query if it's non-default.
     if (listenSpec.tag) {
-      req['q'] = query.queryObject();
+      req['q'] = query._queryObject;
       req['t'] = listenSpec.tag;
     }
 
@@ -263,14 +336,14 @@ export class PersistentConnection extends ServerActions {
     });
   }
 
-  private static warnOnListenWarnings_(payload: unknown, query: Query) {
+  private static warnOnListenWarnings_(payload: unknown, query: QueryContext) {
     if (payload && typeof payload === 'object' && contains(payload, 'w')) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const warnings = safeGet(payload as any, 'w');
       if (Array.isArray(warnings) && ~warnings.indexOf('no_index')) {
         const indexSpec =
-          '".indexOn": "' + query.getQueryParams().getIndex().toString() + '"';
-        const indexPath = query.path.toString();
+          '".indexOn": "' + query._queryParams.getIndex().toString() + '"';
+        const indexPath = query._path.toString();
         warn(
           `Using an unspecified index. Your data will be downloaded and ` +
             `filtered on the client. Consider adding ${indexSpec} at ` +
@@ -280,9 +353,6 @@ export class PersistentConnection extends ServerActions {
     }
   }
 
-  /**
-   * @inheritDoc
-   */
   refreshAuthToken(token: string) {
     this.authToken_ = token;
     this.log_('Auth token refreshed');
@@ -308,6 +378,21 @@ export class PersistentConnection extends ServerActions {
         'Admin auth credential detected.  Reducing max reconnect time.'
       );
       this.maxReconnectDelay_ = RECONNECT_MAX_DELAY_FOR_ADMINS;
+    }
+  }
+
+  refreshAppCheckToken(token: string | null) {
+    this.appCheckToken_ = token;
+    this.log_('App check token refreshed');
+    if (this.appCheckToken_) {
+      this.tryAppCheck();
+    } else {
+      //If we're connected we want to let the server know to unauthenticate us.
+      //If we're not connected, simply delete the credential so we dont become
+      // authenticated next time we connect.
+      if (this.connected_) {
+        this.sendRequest('unappeck', {}, () => {});
+      }
     }
   }
 
@@ -346,22 +431,44 @@ export class PersistentConnection extends ServerActions {
   }
 
   /**
+   * Attempts to authenticate with the given token. If the authentication
+   * attempt fails, it's triggered like the token was revoked (the connection is
+   * closed).
+   */
+  tryAppCheck() {
+    if (this.connected_ && this.appCheckToken_) {
+      this.sendRequest(
+        'appcheck',
+        { 'token': this.appCheckToken_ },
+        (res: { [k: string]: unknown }) => {
+          const status = res[/*status*/ 's'] as string;
+          const data = (res[/*data*/ 'd'] as string) || 'error';
+          if (status === 'ok') {
+            this.invalidAppCheckTokenCount_ = 0;
+          } else {
+            this.onAppCheckRevoked_(status, data);
+          }
+        }
+      );
+    }
+  }
+
+  /**
    * @inheritDoc
    */
-  unlisten(query: Query, tag: number | null) {
-    const pathString = query.path.toString();
-    const queryId = query.queryIdentifier();
+  unlisten(query: QueryContext, tag: number | null) {
+    const pathString = query._path.toString();
+    const queryId = query._queryIdentifier;
 
     this.log_('Unlisten called for ' + pathString + ' ' + queryId);
 
     assert(
-      query.getQueryParams().isDefault() ||
-        !query.getQueryParams().loadsAllData(),
+      query._queryParams.isDefault() || !query._queryParams.loadsAllData(),
       'unlisten() called for non-default but complete query'
     );
     const listen = this.removeListen_(pathString, queryId);
     if (listen && this.connected_) {
-      this.sendUnlisten_(pathString, queryId, query.queryObject(), tag);
+      this.sendUnlisten_(pathString, queryId, query._queryObject, tag);
     }
   }
 
@@ -384,14 +491,13 @@ export class PersistentConnection extends ServerActions {
     this.sendRequest(action, req);
   }
 
-  /**
-   * @inheritDoc
-   */
   onDisconnectPut(
     pathString: string,
     data: unknown,
     onComplete?: (a: string, b: string) => void
   ) {
+    this.initConnection_();
+
     if (this.connected_) {
       this.sendOnDisconnect_('o', pathString, data, onComplete);
     } else {
@@ -404,14 +510,13 @@ export class PersistentConnection extends ServerActions {
     }
   }
 
-  /**
-   * @inheritDoc
-   */
   onDisconnectMerge(
     pathString: string,
     data: unknown,
     onComplete?: (a: string, b: string) => void
   ) {
+    this.initConnection_();
+
     if (this.connected_) {
       this.sendOnDisconnect_('om', pathString, data, onComplete);
     } else {
@@ -424,13 +529,12 @@ export class PersistentConnection extends ServerActions {
     }
   }
 
-  /**
-   * @inheritDoc
-   */
   onDisconnectCancel(
     pathString: string,
     onComplete?: (a: string, b: string) => void
   ) {
+    this.initConnection_();
+
     if (this.connected_) {
       this.sendOnDisconnect_('oc', pathString, null, onComplete);
     } else {
@@ -463,9 +567,6 @@ export class PersistentConnection extends ServerActions {
     });
   }
 
-  /**
-   * @inheritDoc
-   */
   put(
     pathString: string,
     data: unknown,
@@ -475,9 +576,6 @@ export class PersistentConnection extends ServerActions {
     this.putInternal('p', pathString, data, onComplete, hash);
   }
 
-  /**
-   * @inheritDoc
-   */
   merge(
     pathString: string,
     data: unknown,
@@ -494,6 +592,8 @@ export class PersistentConnection extends ServerActions {
     onComplete: (a: string, b: string | null) => void,
     hash?: string
   ) {
+    this.initConnection_();
+
     const request: { [k: string]: unknown } = {
       /*path*/ p: pathString,
       /*data*/ d: data
@@ -546,9 +646,6 @@ export class PersistentConnection extends ServerActions {
     });
   }
 
-  /**
-   * @inheritDoc
-   */
   reportStats(stats: { [k: string]: unknown }) {
     // If we're not connected, we just drop the stats.
     if (this.connected_) {
@@ -609,6 +706,11 @@ export class PersistentConnection extends ServerActions {
         body[/*status code*/ 's'] as string,
         body[/* explanation */ 'd'] as string
       );
+    } else if (action === 'apc') {
+      this.onAppCheckRevoked_(
+        body[/*status code*/ 's'] as string,
+        body[/* explanation */ 'd'] as string
+      );
     } else if (action === 'sd') {
       this.onSecurityDebugPacket_(body);
     } else {
@@ -652,6 +754,12 @@ export class PersistentConnection extends ServerActions {
       this.establishConnection_();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     }, Math.floor(timeout)) as any;
+  }
+
+  private initConnection_() {
+    if (!this.realtime_ && this.firstConnection_) {
+      this.scheduleConnect_(0);
+    }
   }
 
   private onVisible_(visible: boolean) {
@@ -732,7 +840,7 @@ export class PersistentConnection extends ServerActions {
     this.onConnectStatus_(false);
   }
 
-  private establishConnection_() {
+  private async establishConnection_() {
     if (this.shouldReconnect_()) {
       this.log_('Making a connection attempt');
       this.lastConnectionAttemptTime_ = new Date().getTime();
@@ -741,7 +849,6 @@ export class PersistentConnection extends ServerActions {
       const onReady = this.onReady_.bind(this);
       const onDisconnect = this.onRealtimeDisconnect_.bind(this);
       const connId = this.id + ':' + PersistentConnection.nextConnectionId_++;
-      const self = this;
       const lastSessionId = this.lastSessionId;
       let canceled = false;
       let connection: Connection | null = null;
@@ -769,42 +876,48 @@ export class PersistentConnection extends ServerActions {
       const forceRefresh = this.forceTokenRefresh_;
       this.forceTokenRefresh_ = false;
 
-      // First fetch auth token, and establish connection after fetching the token was successful
-      this.authTokenProvider_
-        .getToken(forceRefresh)
-        .then(result => {
-          if (!canceled) {
-            log('getToken() completed. Creating connection.');
-            self.authToken_ = result && result.accessToken;
-            connection = new Connection(
-              connId,
-              self.repoInfo_,
-              self.applicationId_,
-              onDataMessage,
-              onReady,
-              onDisconnect,
-              /* onKill= */ reason => {
-                warn(reason + ' (' + self.repoInfo_.toString() + ')');
-                self.interrupt(SERVER_KILL_INTERRUPT_REASON);
-              },
-              lastSessionId
-            );
-          } else {
-            log('getToken() completed but was canceled');
+      try {
+        // First fetch auth and app check token, and establish connection after
+        // fetching the token was successful
+        const [authToken, appCheckToken] = await Promise.all([
+          this.authTokenProvider_.getToken(forceRefresh),
+          this.appCheckTokenProvider_.getToken(forceRefresh)
+        ]);
+
+        if (!canceled) {
+          log('getToken() completed. Creating connection.');
+          this.authToken_ = authToken && authToken.accessToken;
+          this.appCheckToken_ = appCheckToken && appCheckToken.token;
+          connection = new Connection(
+            connId,
+            this.repoInfo_,
+            this.applicationId_,
+            this.appCheckToken_,
+            this.authToken_,
+            onDataMessage,
+            onReady,
+            onDisconnect,
+            /* onKill= */ reason => {
+              warn(reason + ' (' + this.repoInfo_.toString() + ')');
+              this.interrupt(SERVER_KILL_INTERRUPT_REASON);
+            },
+            lastSessionId
+          );
+        } else {
+          log('getToken() completed but was canceled');
+        }
+      } catch (error) {
+        this.log_('Failed to get token: ' + error);
+        if (!canceled) {
+          if (this.repoInfo_.nodeAdmin) {
+            // This may be a critical error for the Admin Node.js SDK, so log a warning.
+            // But getToken() may also just have temporarily failed, so we still want to
+            // continue retrying.
+            warn(error);
           }
-        })
-        .then(null, error => {
-          self.log_('Failed to get token: ' + error);
-          if (!canceled) {
-            if (CONSTANTS.NODE_ADMIN) {
-              // This may be a critical error for the Admin Node.js SDK, so log a warning.
-              // But getToken() may also just have temporarily failed, so we still want to
-              // continue retrying.
-              warn(error);
-            }
-            closeFn();
-          }
-        });
+          closeFn();
+        }
+      }
     }
   }
 
@@ -900,13 +1013,30 @@ export class PersistentConnection extends ServerActions {
       // retry period since oauth tokens will report as "invalid" if they're
       // just expired. Plus there may be transient issues that resolve themselves.
       this.invalidAuthTokenCount_++;
-      if (this.invalidAuthTokenCount_ >= INVALID_AUTH_TOKEN_THRESHOLD) {
+      if (this.invalidAuthTokenCount_ >= INVALID_TOKEN_THRESHOLD) {
         // Set a long reconnect delay because recovery is unlikely
         this.reconnectDelay_ = RECONNECT_MAX_DELAY_FOR_ADMINS;
 
         // Notify the auth token provider that the token is invalid, which will log
         // a warning
         this.authTokenProvider_.notifyForInvalidToken();
+      }
+    }
+  }
+
+  private onAppCheckRevoked_(statusCode: string, explanation: string) {
+    log('App check token revoked: ' + statusCode + '/' + explanation);
+    this.appCheckToken_ = null;
+    this.forceTokenRefresh_ = true;
+    // Note: We don't close the connection as the developer may not have
+    // enforcement enabled. The backend closes connections with enforcements.
+    if (statusCode === 'invalid_token' || statusCode === 'permission_denied') {
+      // We'll wait a couple times before logging the warning / increasing the
+      // retry period since oauth tokens will report as "invalid" if they're
+      // just expired. Plus there may be transient issues that resolve themselves.
+      this.invalidAppCheckTokenCount_++;
+      if (this.invalidAppCheckTokenCount_ >= INVALID_TOKEN_THRESHOLD) {
+        this.appCheckTokenProvider_.notifyForInvalidToken();
       }
     }
   }
@@ -926,6 +1056,7 @@ export class PersistentConnection extends ServerActions {
   private restoreState_() {
     //Re-authenticate ourselves if we have a credential stored.
     this.tryAuth();
+    this.tryAppCheck();
 
     // Puts depend on having received the corresponding data update from the server before they complete, so we must
     // make sure to send listens before puts.
@@ -950,6 +1081,12 @@ export class PersistentConnection extends ServerActions {
         request.onComplete
       );
     }
+
+    for (let i = 0; i < this.outstandingGets_.length; i++) {
+      if (this.outstandingGets_[i]) {
+        this.sendGet_(i);
+      }
+    }
   }
 
   /**
@@ -959,10 +1096,12 @@ export class PersistentConnection extends ServerActions {
     const stats: { [k: string]: number } = {};
 
     let clientName = 'js';
-    if (CONSTANTS.NODE_ADMIN) {
-      clientName = 'admin_node';
-    } else if (CONSTANTS.NODE_CLIENT) {
-      clientName = 'node';
+    if (isNodeSdk()) {
+      if (this.repoInfo_.nodeAdmin) {
+        clientName = 'admin_node';
+      } else {
+        clientName = 'node';
+      }
     }
 
     stats['sdk.' + clientName + '.' + SDK_VERSION.replace(/\./g, '-')] = 1;

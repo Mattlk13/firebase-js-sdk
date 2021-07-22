@@ -15,12 +15,14 @@
  * limitations under the License.
  */
 
-import { FirebaseOptions, FirebaseApp } from '@firebase/app-types-exp';
+import { FirebaseOptions, FirebaseApp } from '@firebase/app-exp';
 import { Provider, ComponentContainer } from '@firebase/component';
 import { FirebaseAuthInternalName } from '@firebase/auth-interop-types';
 import { FirebaseMessagingName } from '@firebase/messaging-types';
+import { AppCheckInternalComponentName } from '@firebase/app-check-interop-types';
 import { FunctionsService } from '../src/service';
-import { useFunctionsEmulator } from '../src/api';
+import { connectFunctionsEmulator } from '../src/api';
+import nodeFetch from 'node-fetch';
 
 export function makeFakeApp(options: FirebaseOptions = {}): FirebaseApp {
   options = {
@@ -50,19 +52,29 @@ export function createTestService(
   messagingProvider = new Provider<FirebaseMessagingName>(
     'messaging',
     new ComponentContainer('test')
+  ),
+  appCheckProvider = new Provider<AppCheckInternalComponentName>(
+    'app-check-internal',
+    new ComponentContainer('test')
   )
 ): FunctionsService {
+  const fetchImpl: typeof fetch =
+    typeof window !== 'undefined' ? fetch.bind(window) : (nodeFetch as any);
   const functions = new FunctionsService(
     app,
     authProvider,
     messagingProvider,
-    region
+    appCheckProvider,
+    region,
+    fetchImpl
   );
   const useEmulator = !!process.env.FIREBASE_FUNCTIONS_EMULATOR_ORIGIN;
   if (useEmulator) {
-    useFunctionsEmulator(
+    const url = new URL(process.env.FIREBASE_FUNCTIONS_EMULATOR_ORIGIN!);
+    connectFunctionsEmulator(
       functions,
-      process.env.FIREBASE_FUNCTIONS_EMULATOR_ORIGIN!
+      url.hostname,
+      Number.parseInt(url.port, 10)
     );
   }
   return functions;

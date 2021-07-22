@@ -16,7 +16,7 @@
  */
 
 const tmp = require('tmp');
-const json = require('rollup-plugin-json');
+const json = require('@rollup/plugin-json');
 const alias = require('@rollup/plugin-alias');
 const typescriptPlugin = require('rollup-plugin-typescript2');
 const typescript = require('typescript');
@@ -74,24 +74,40 @@ function generateAliasConfig(platform) {
 }
 exports.generateAliasConfig = generateAliasConfig;
 
-const browserDeps = Object.keys(
-  Object.assign({}, pkg.peerDependencies, pkg.dependencies)
-);
+const browserDeps = [
+  ...Object.keys(Object.assign({}, pkg.peerDependencies, pkg.dependencies)),
+  '@firebase/app'
+];
 
 const nodeDeps = [...browserDeps, 'util', 'path'];
 
 /** Resolves the external dependencies for the browser build. */
 exports.resolveBrowserExterns = function (id) {
-  return browserDeps.some(dep => id === dep || id.startsWith(`${dep}/`));
+  return [...browserDeps, '@firebase/firestore'].some(
+    dep => id === dep || id.startsWith(`${dep}/`)
+  );
 };
 
 /** Resolves the external dependencies for the Node build. */
 exports.resolveNodeExterns = function (id) {
-  return nodeDeps.some(dep => id === dep || id.startsWith(`${dep}/`));
+  return [...nodeDeps, '@firebase/firestore'].some(
+    dep => id === dep || id.startsWith(`${dep}/`)
+  );
+};
+
+/** Breaks the build if there is a circular dependency. */
+exports.onwarn = function (warning, defaultWarn) {
+  if (warning.code === 'CIRCULAR_DEPENDENCY') {
+    throw new Error(warning);
+  }
+  defaultWarn(warning);
 };
 
 const externsPaths = externs.map(p => path.resolve(__dirname, '../../', p));
+
 const publicIdentifiers = extractPublicIdentifiers(externsPaths);
+// manually add `_delegate` because we don't have typings for the compat package
+publicIdentifiers.add('_delegate');
 
 /**
  * Transformers that remove calls to `debugAssert` and messages for 'fail` and
@@ -102,6 +118,16 @@ const removeAssertTransformer = service => ({
   after: []
 });
 exports.removeAssertTransformer = removeAssertTransformer;
+
+/**
+ * Transformer that coverts import paths that match `exp/index` to `@firebase/firestore`
+ * and `lite/index` to `@firebase/firestore/lite`
+ */
+const importTransformer = service => ({
+  before: [removeAsserts(service.getProgram())],
+  after: []
+});
+exports.importTransformer = importTransformer;
 
 /**
  * Transformers that remove calls to `debugAssert`, messages for 'fail` and
@@ -129,11 +155,90 @@ const manglePrivatePropertiesOptions = {
   },
   mangle: {
     properties: {
-      regex: /^__PRIVATE_/
+      regex: /^__PRIVATE_/,
+      // All JS Keywords are reserved. Although this should be taken cared of by
+      // Terser, we have seen issues with `do`, hence the extra caution.
+      reserved: [
+        'abstract',
+        'arguments',
+        'await',
+        'boolean',
+        'break',
+        'byte',
+        'case',
+        'catch',
+        'char',
+        'class',
+        'const',
+        'continue',
+        'debugger',
+        'default',
+        'delete',
+        'do',
+        'double',
+        'else',
+        'enum',
+        'eval',
+        'export',
+        'extends',
+        'false',
+        'final',
+        'finally',
+        'float',
+        'for',
+        'function',
+        'goto',
+        'if',
+        'implements',
+        'import',
+        'in',
+        'instanceof',
+        'int',
+        'interface',
+        'let',
+        'long',
+        'native',
+        'new',
+        'null',
+        'package',
+        'private',
+        'protected',
+        'public',
+        'return',
+        'short',
+        'static',
+        'super',
+        'switch',
+        'synchronized',
+        'this',
+        'throw',
+        'throws',
+        'transient',
+        'true',
+        'try',
+        'typeof',
+        'var',
+        'void',
+        'volatile',
+        'while',
+        'with',
+        'yield'
+      ]
     }
   }
 };
 exports.manglePrivatePropertiesOptions = manglePrivatePropertiesOptions;
+
+exports.applyPrebuilt = function (name = 'prebuilt.js') {
+  return alias({
+    entries: [
+      {
+        find: /^(.*)\/export$/,
+        replacement: `$1\/dist/${name}`
+      }
+    ]
+  });
+};
 
 exports.es2017Plugins = function (platform, mangled = false) {
   if (mangled) {
@@ -175,10 +280,13 @@ exports.es2017ToEs5Plugins = function (mangled = false) {
     return [
       typescriptPlugin({
         typescript,
-        compilerOptions: {
-          allowJs: true
+        tsconfigOverride: {
+          compilerOptions: {
+            allowJs: true
+          }
         },
-        include: ['dist/*.js', 'dist/exp/*.js']
+        include: ['dist/**/*.js'],
+        cacheDir: tmp.dirSync()
       }),
       terser({
         output: {
@@ -193,12 +301,59 @@ exports.es2017ToEs5Plugins = function (mangled = false) {
     return [
       typescriptPlugin({
         typescript,
-        compilerOptions: {
-          allowJs: true
+        tsconfigOverride: {
+          compilerOptions: {
+            allowJs: true
+          }
         },
-        include: ['dist/*.js', 'dist/exp/*.js']
+        include: ['dist/**/*.js'],
+        cacheDir: tmp.dirSync()
       }),
       sourcemaps()
+    ];
+  }
+};
+
+exports.es2017PluginsCompat = function (
+  platform,
+  pathTransformer,
+  mangled = false
+) {
+  if (mangled) {
+    return [
+      alias(generateAliasConfig(platform)),
+      typescriptPlugin({
+        typescript,
+        tsconfigOverride: {
+          compilerOptions: {
+            target: 'es2017'
+          }
+        },
+        cacheDir: tmp.dirSync(),
+        abortOnError: false,
+        transformers: [
+          removeAssertAndPrefixInternalTransformer,
+          pathTransformer
+        ]
+      }),
+      json({ preferConst: true }),
+      terser(manglePrivatePropertiesOptions)
+    ];
+  } else {
+    return [
+      alias(generateAliasConfig(platform)),
+      typescriptPlugin({
+        typescript,
+        tsconfigOverride: {
+          compilerOptions: {
+            target: 'es2017'
+          }
+        },
+        cacheDir: tmp.dirSync(),
+        abortOnError: false,
+        transformers: [removeAssertTransformer, pathTransformer]
+      }),
+      json({ preferConst: true })
     ];
   }
 };

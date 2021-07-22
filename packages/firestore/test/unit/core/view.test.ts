@@ -16,6 +16,7 @@
  */
 
 import { expect } from 'chai';
+
 import { LimitType, queryWithLimit } from '../../../src/core/query';
 import { View } from '../../../src/core/view';
 import { ChangeType } from '../../../src/core/view_snapshot';
@@ -546,7 +547,7 @@ describe('View', () => {
     view.applyChanges(changes, true);
     expect(changes.mutatedKeys).to.deep.equal(keySet());
 
-    const doc3 = doc('rooms/eros/msgs/2', 0, {}, { hasLocalMutations: true });
+    const doc3 = doc('rooms/eros/msgs/2', 0, {}).setHasLocalMutations();
     changes = view.computeDocChanges(documentUpdates(doc3));
     expect(changes.mutatedKeys).to.deep.equal(keySet(doc3.key));
   });
@@ -557,7 +558,7 @@ describe('View', () => {
     () => {
       const query1 = query('rooms/eros/msgs');
       const doc1 = doc('rooms/eros/msgs/0', 0, {});
-      const doc2 = doc('rooms/eros/msgs/1', 0, {}, { hasLocalMutations: true });
+      const doc2 = doc('rooms/eros/msgs/1', 0, {}).setHasLocalMutations();
       const view = new View(query1, documentKeySet());
       // Start with a full view.
       let changes = view.computeDocChanges(documentUpdates(doc1, doc2));
@@ -574,7 +575,7 @@ describe('View', () => {
   it('remembers local mutations from previous snapshot', () => {
     const query1 = query('rooms/eros/msgs');
     const doc1 = doc('rooms/eros/msgs/0', 0, {});
-    const doc2 = doc('rooms/eros/msgs/1', 0, {}, { hasLocalMutations: true });
+    const doc2 = doc('rooms/eros/msgs/1', 0, {}).setHasLocalMutations();
     const view = new View(query1, documentKeySet());
     // Start with a full view.
     let changes = view.computeDocChanges(documentUpdates(doc1, doc2));
@@ -589,7 +590,7 @@ describe('View', () => {
   it('remembers local mutations from previous call to computeDocChanges', () => {
     const query1 = query('rooms/eros/msgs');
     const doc1 = doc('rooms/eros/msgs/0', 0, {});
-    const doc2 = doc('rooms/eros/msgs/1', 0, {}, { hasLocalMutations: true });
+    const doc2 = doc('rooms/eros/msgs/1', 0, {}).setHasLocalMutations();
     const view = new View(query1, documentKeySet());
     // Start with a full view.
     let changes = view.computeDocChanges(documentUpdates(doc1, doc2));

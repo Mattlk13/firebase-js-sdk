@@ -25,11 +25,15 @@ export {
   apps,
   assertFails,
   assertSucceeds,
+  discoverEmulators,
   clearFirestoreData,
   database,
   firestore,
   initializeAdminApp,
   initializeTestApp,
   loadDatabaseRules,
-  loadFirestoreRules
+  loadFirestoreRules,
+  loadStorageRules,
+  useEmulators,
+  withFunctionTriggersDisabled
 } from './src/api';

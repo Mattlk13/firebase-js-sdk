@@ -16,7 +16,7 @@
  */
 import { assert } from 'chai';
 import { createTestService } from '../test/utils';
-import { FunctionsService, useFunctionsEmulator } from './service';
+import { FunctionsService, connectFunctionsEmulator } from './service';
 
 describe('Firebase Functions > Service', () => {
   describe('simple constructor', () => {
@@ -41,7 +41,7 @@ describe('Firebase Functions > Service', () => {
 
     it('can use emulator', () => {
       service = createTestService(app);
-      useFunctionsEmulator(service, 'http://localhost:5005');
+      connectFunctionsEmulator(service, 'localhost', 5005);
       assert.equal(
         service._url('foo'),
         'http://localhost:5005/my-project/us-central1/foo'
@@ -58,10 +58,24 @@ describe('Firebase Functions > Service', () => {
 
     it('correctly sets region with emulator', () => {
       service = createTestService(app, 'my-region');
-      useFunctionsEmulator(service, 'http://localhost:5005');
+      connectFunctionsEmulator(service, 'localhost', 5005);
       assert.equal(
         service._url('foo'),
         'http://localhost:5005/my-project/my-region/foo'
+      );
+    });
+
+    it('correctly sets custom domain', () => {
+      service = createTestService(app, 'https://mydomain.com');
+      assert.equal(service._url('foo'), 'https://mydomain.com/foo');
+    });
+
+    it('prefers emulator to custom domain', () => {
+      const service = createTestService(app, 'https://mydomain.com');
+      connectFunctionsEmulator(service, 'localhost', 5005);
+      assert.equal(
+        service._url('foo'),
+        'http://localhost:5005/my-project/us-central1/foo'
       );
     });
   });

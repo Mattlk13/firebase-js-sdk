@@ -16,27 +16,25 @@
  */
 
 import { isCollectionGroupQuery, Query, queryMatches } from '../core/query';
+import { SnapshotVersion } from '../core/snapshot_version';
 import {
   DocumentKeySet,
-  DocumentMap,
-  documentMap,
   DocumentSizeEntry,
-  NullableMaybeDocumentMap,
-  nullableMaybeDocumentMap
+  MutableDocumentMap,
+  mutableDocumentMap
 } from '../model/collections';
-import { Document, MaybeDocument } from '../model/document';
+import { Document, MutableDocument } from '../model/document';
 import { DocumentKey } from '../model/document_key';
-
-import { SnapshotVersion } from '../core/snapshot_version';
 import { debugAssert } from '../util/assert';
 import { SortedMap } from '../util/sorted_map';
+
 import { IndexManager } from './index_manager';
-import { PersistenceTransaction } from './persistence';
 import { PersistencePromise } from './persistence_promise';
+import { PersistenceTransaction } from './persistence_transaction';
 import { RemoteDocumentCache } from './remote_document_cache';
 import { RemoteDocumentChangeBuffer } from './remote_document_change_buffer';
 
-export type DocumentSizer = (doc: MaybeDocument) => number;
+export type DocumentSizer = (doc: Document) => number;
 
 /** Miscellaneous collection types / constants. */
 interface MemoryRemoteDocumentCacheEntry extends DocumentSizeEntry {
@@ -50,7 +48,18 @@ function documentEntryMap(): DocumentEntryMap {
   );
 }
 
-export class MemoryRemoteDocumentCache implements RemoteDocumentCache {
+export interface MemoryRemoteDocumentCache extends RemoteDocumentCache {
+  forEachDocumentKey(
+    transaction: PersistenceTransaction,
+    f: (key: DocumentKey) => PersistencePromise<void>
+  ): PersistencePromise<void>;
+}
+
+/**
+ * The memory-only RemoteDocumentCache for IndexedDb. To construct, invoke
+ * `newMemoryRemoteDocumentCache()`.
+ */
+class MemoryRemoteDocumentCacheImpl implements MemoryRemoteDocumentCache {
   /** Underlying cache of documents and their read times. */
   private docs = documentEntryMap();
 
@@ -58,8 +67,9 @@ export class MemoryRemoteDocumentCache implements RemoteDocumentCache {
   private size = 0;
 
   /**
-   * @param sizer Used to assess the size of a document. For eager GC, this is expected to just
-   * return 0 to avoid unnecessarily doing the work of calculating the size.
+   * @param sizer - Used to assess the size of a document. For eager GC, this is
+   * expected to just return 0 to avoid unnecessarily doing the work of
+   * calculating the size.
    */
   constructor(
     private readonly indexManager: IndexManager,
@@ -72,9 +82,9 @@ export class MemoryRemoteDocumentCache implements RemoteDocumentCache {
    * All calls of `addEntry`  are required to go through the RemoteDocumentChangeBuffer
    * returned by `newChangeBuffer()`.
    */
-  private addEntry(
+  addEntry(
     transaction: PersistenceTransaction,
-    doc: MaybeDocument,
+    doc: MutableDocument,
     readTime: SnapshotVersion
   ): PersistencePromise<void> {
     debugAssert(
@@ -88,7 +98,7 @@ export class MemoryRemoteDocumentCache implements RemoteDocumentCache {
     const currentSize = this.sizer(doc);
 
     this.docs = this.docs.insert(key, {
-      maybeDocument: doc,
+      document: doc.clone(),
       size: currentSize,
       readTime
     });
@@ -107,7 +117,7 @@ export class MemoryRemoteDocumentCache implements RemoteDocumentCache {
    * All calls of `removeEntry` are required to go through the RemoteDocumentChangeBuffer
    * returned by `newChangeBuffer()`.
    */
-  private removeEntry(documentKey: DocumentKey): void {
+  removeEntry(documentKey: DocumentKey): void {
     const entry = this.docs.get(documentKey);
     if (entry) {
       this.docs = this.docs.remove(documentKey);
@@ -118,19 +128,28 @@ export class MemoryRemoteDocumentCache implements RemoteDocumentCache {
   getEntry(
     transaction: PersistenceTransaction,
     documentKey: DocumentKey
-  ): PersistencePromise<MaybeDocument | null> {
+  ): PersistencePromise<MutableDocument> {
     const entry = this.docs.get(documentKey);
-    return PersistencePromise.resolve(entry ? entry.maybeDocument : null);
+    return PersistencePromise.resolve(
+      entry
+        ? entry.document.clone()
+        : MutableDocument.newInvalidDocument(documentKey)
+    );
   }
 
   getEntries(
     transaction: PersistenceTransaction,
     documentKeys: DocumentKeySet
-  ): PersistencePromise<NullableMaybeDocumentMap> {
-    let results = nullableMaybeDocumentMap();
+  ): PersistencePromise<MutableDocumentMap> {
+    let results = mutableDocumentMap();
     documentKeys.forEach(documentKey => {
       const entry = this.docs.get(documentKey);
-      results = results.insert(documentKey, entry ? entry.maybeDocument : null);
+      results = results.insert(
+        documentKey,
+        entry
+          ? entry.document.clone()
+          : MutableDocument.newInvalidDocument(documentKey)
+      );
     });
     return PersistencePromise.resolve(results);
   }
@@ -139,12 +158,12 @@ export class MemoryRemoteDocumentCache implements RemoteDocumentCache {
     transaction: PersistenceTransaction,
     query: Query,
     sinceReadTime: SnapshotVersion
-  ): PersistencePromise<DocumentMap> {
+  ): PersistencePromise<MutableDocumentMap> {
     debugAssert(
       !isCollectionGroupQuery(query),
       'CollectionGroup queries should be handled in LocalDocumentsView'
     );
-    let results = documentMap();
+    let results = mutableDocumentMap();
 
     // Documents are ordered by key, so we can use a prefix scan to narrow down
     // the documents we need to match the query against.
@@ -153,7 +172,7 @@ export class MemoryRemoteDocumentCache implements RemoteDocumentCache {
     while (iterator.hasNext()) {
       const {
         key,
-        value: { maybeDocument, readTime }
+        value: { document, readTime }
       } = iterator.getNext();
       if (!query.path.isPrefixOf(key.path)) {
         break;
@@ -161,12 +180,10 @@ export class MemoryRemoteDocumentCache implements RemoteDocumentCache {
       if (readTime.compareTo(sinceReadTime) <= 0) {
         continue;
       }
-      if (
-        maybeDocument instanceof Document &&
-        queryMatches(query, maybeDocument)
-      ) {
-        results = results.insert(maybeDocument.key, maybeDocument);
+      if (!queryMatches(query, document)) {
+        continue;
       }
+      results = results.insert(document.key, document.clone());
     }
     return PersistencePromise.resolve(results);
   }
@@ -183,49 +200,68 @@ export class MemoryRemoteDocumentCache implements RemoteDocumentCache {
   }): RemoteDocumentChangeBuffer {
     // `trackRemovals` is ignores since the MemoryRemoteDocumentCache keeps
     // a separate changelog and does not need special handling for removals.
-    return new MemoryRemoteDocumentCache.RemoteDocumentChangeBuffer(this);
+    return new MemoryRemoteDocumentChangeBuffer(this);
   }
 
   getSize(txn: PersistenceTransaction): PersistencePromise<number> {
     return PersistencePromise.resolve(this.size);
   }
+}
 
-  /**
-   * Handles the details of adding and updating documents in the MemoryRemoteDocumentCache.
-   */
-  private static RemoteDocumentChangeBuffer = class extends RemoteDocumentChangeBuffer {
-    constructor(private readonly documentCache: MemoryRemoteDocumentCache) {
-      super();
-    }
+/**
+ * Creates a new memory-only RemoteDocumentCache.
+ *
+ * @param indexManager - A class that manages collection group indices.
+ * @param sizer - Used to assess the size of a document. For eager GC, this is
+ * expected to just return 0 to avoid unnecessarily doing the work of
+ * calculating the size.
+ */
+export function newMemoryRemoteDocumentCache(
+  indexManager: IndexManager,
+  sizer: DocumentSizer
+): MemoryRemoteDocumentCache {
+  return new MemoryRemoteDocumentCacheImpl(indexManager, sizer);
+}
 
-    protected applyChanges(
-      transaction: PersistenceTransaction
-    ): PersistencePromise<void> {
-      const promises: Array<PersistencePromise<void>> = [];
-      this.changes.forEach((key, doc) => {
-        if (doc) {
-          promises.push(
-            this.documentCache.addEntry(transaction, doc, this.readTime)
-          );
-        } else {
-          this.documentCache.removeEntry(key);
-        }
-      });
-      return PersistencePromise.waitFor(promises);
-    }
+/**
+ * Handles the details of adding and updating documents in the MemoryRemoteDocumentCache.
+ */
+class MemoryRemoteDocumentChangeBuffer extends RemoteDocumentChangeBuffer {
+  constructor(private readonly documentCache: MemoryRemoteDocumentCacheImpl) {
+    super();
+  }
 
-    protected getFromCache(
-      transaction: PersistenceTransaction,
-      documentKey: DocumentKey
-    ): PersistencePromise<MaybeDocument | null> {
-      return this.documentCache.getEntry(transaction, documentKey);
-    }
+  protected applyChanges(
+    transaction: PersistenceTransaction
+  ): PersistencePromise<void> {
+    const promises: Array<PersistencePromise<void>> = [];
+    this.changes.forEach((key, doc) => {
+      if (doc.document.isValidDocument()) {
+        promises.push(
+          this.documentCache.addEntry(
+            transaction,
+            doc.document,
+            this.getReadTime(key)
+          )
+        );
+      } else {
+        this.documentCache.removeEntry(key);
+      }
+    });
+    return PersistencePromise.waitFor(promises);
+  }
 
-    protected getAllFromCache(
-      transaction: PersistenceTransaction,
-      documentKeys: DocumentKeySet
-    ): PersistencePromise<NullableMaybeDocumentMap> {
-      return this.documentCache.getEntries(transaction, documentKeys);
-    }
-  };
+  protected getFromCache(
+    transaction: PersistenceTransaction,
+    documentKey: DocumentKey
+  ): PersistencePromise<MutableDocument> {
+    return this.documentCache.getEntry(transaction, documentKey);
+  }
+
+  protected getAllFromCache(
+    transaction: PersistenceTransaction,
+    documentKeys: DocumentKeySet
+  ): PersistencePromise<MutableDocumentMap> {
+    return this.documentCache.getEntries(transaction, documentKeys);
+  }
 }

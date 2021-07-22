@@ -16,6 +16,7 @@
  */
 
 import { expect } from 'chai';
+
 import { IndexedDbPersistence } from '../../../src/local/indexeddb_persistence';
 import { deletedDoc, doc, expectEqual, key, version } from '../../util/helpers';
 
@@ -74,7 +75,8 @@ describe('RemoteDocumentChangeBuffer', () => {
     buffer.addEntry(newADoc, newADoc.version);
     expect(await buffer.getEntry(key('coll/a'))).to.not.be.null;
     buffer.removeEntry(newADoc.key);
-    expect(await buffer.getEntry(key('coll/a'))).to.be.null;
+    expect((await buffer.getEntry(key('coll/a'))).isValidDocument()).to.be
+      .false;
   });
 
   it('can apply changes', async () => {
@@ -100,7 +102,7 @@ describe('RemoteDocumentChangeBuffer', () => {
 
     await buffer.apply();
 
-    expect(await cache.getEntry(key('coll/a'))).to.be.null;
+    expect((await cache.getEntry(key('coll/a'))).isValidDocument()).to.be.false;
   });
 
   it('methods fail after apply.', async () => {
@@ -115,14 +117,5 @@ describe('RemoteDocumentChangeBuffer', () => {
       .then(() => buffer.apply())
       .catch(() => errors++)
       .then(() => expect(errors).to.equal(2));
-  });
-
-  it('cannot add documents with different read times', async () => {
-    // This test merely validates an assert that was added to the
-    // RemoteDocumentChangeBuffer to simplify our tracking of document
-    // read times. If we do need to track documents with different read
-    // times, this test should simply be removed.
-    buffer.addEntry(INITIAL_DOC, version(1));
-    expect(() => buffer.addEntry(INITIAL_DOC, version(2))).to.throw();
   });
 });

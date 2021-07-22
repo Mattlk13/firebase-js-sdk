@@ -16,15 +16,16 @@
  */
 
 import { expect } from 'chai';
-import { Stream } from '../../../src/remote/connection';
-import { DatabaseId, DatabaseInfo } from '../../../src/core/database_info';
-import { RestConnection } from '../../../src/remote/rest_connection';
+
 import { Token } from '../../../src/api/credentials';
-import { StringMap } from '../../../src/util/types';
-import { Code, FirestoreError } from '../../../src/util/error';
 import { User } from '../../../src/auth/user';
+import { DatabaseId, DatabaseInfo } from '../../../src/core/database_info';
 import { SDK_VERSION } from '../../../src/core/version';
+import { Stream } from '../../../src/remote/connection';
+import { RestConnection } from '../../../src/remote/rest_connection';
+import { Code, FirestoreError } from '../../../src/util/error';
 import { Indexable } from '../../../src/util/misc';
+import { StringMap } from '../../../src/util/types';
 
 export class TestRestConnection extends RestConnection {
   lastUrl: string = '';
@@ -46,7 +47,7 @@ export class TestRestConnection extends RestConnection {
     body: Req
   ): Promise<Resp> {
     this.lastUrl = url;
-    this.lastRequestBody = (body as unknown) as Indexable;
+    this.lastRequestBody = body as unknown as Indexable;
     this.lastHeaders = headers;
     const response = this.nextResponse;
     this.nextResponse = Promise.resolve<unknown>({});
@@ -57,10 +58,13 @@ export class TestRestConnection extends RestConnection {
 describe('RestConnection', () => {
   const testDatabaseInfo = new DatabaseInfo(
     new DatabaseId('testproject'),
+    'test-app-id',
     'persistenceKey',
     'example.com',
     /*ssl=*/ false,
-    /*forceLongPolling=*/ false
+    /*forceLongPolling=*/ false,
+    /*autoDetectLongPolling=*/ false,
+    /*useFetchStreams=*/ false
   );
   const connection = new TestRestConnection(testDatabaseInfo);
 
@@ -90,6 +94,7 @@ describe('RestConnection', () => {
     expect(connection.lastHeaders).to.deep.equal({
       'Authorization': 'Bearer owner',
       'Content-Type': 'text/plain',
+      'X-Firebase-GMPID': 'test-app-id',
       'X-Goog-Api-Client': `gl-js/ fire/${SDK_VERSION}`
     });
   });

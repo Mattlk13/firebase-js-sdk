@@ -15,68 +15,234 @@
  * limitations under the License.
  */
 
-import { FirebaseApp } from '@firebase/app-types';
-import * as args from './implementation/args';
 import { Location } from './implementation/location';
 import { FailRequest } from './implementation/failrequest';
 import { Request, makeRequest } from './implementation/request';
 import { RequestInfo } from './implementation/requestinfo';
-import { XhrIoPool } from './implementation/xhriopool';
-import { Reference } from './reference';
+import { ConnectionPool } from './implementation/connectionPool';
+import { Reference, _getChild } from './reference';
 import { Provider } from '@firebase/component';
 import { FirebaseAuthInternalName } from '@firebase/auth-interop-types';
-import { FirebaseOptions } from '@firebase/app-types-exp';
-import * as constants from '../src/implementation/constants';
-import * as errorsExports from './implementation/error';
+import { AppCheckInternalComponentName } from '@firebase/app-check-interop-types';
+import {
+  FirebaseApp,
+  FirebaseOptions,
+  _FirebaseService
+  // eslint-disable-next-line import/no-extraneous-dependencies
+} from '@firebase/app-exp';
+import {
+  CONFIG_STORAGE_BUCKET_KEY,
+  DEFAULT_HOST,
+  DEFAULT_MAX_OPERATION_RETRY_TIME,
+  DEFAULT_MAX_UPLOAD_RETRY_TIME
+} from '../src/implementation/constants';
+import {
+  invalidArgument,
+  appDeleted,
+  noDefaultBucket
+} from './implementation/error';
+import { validateNumber } from './implementation/type';
+
+export function isUrl(path?: string): boolean {
+  return /^[A-Za-z]+:\/\//.test(path as string);
+}
 
 /**
- * A service that provides firebaseStorage.Reference instances.
- * @param opt_url gs:// url to a custom Storage Bucket
- *
- * @struct
+ * Returns a firebaseStorage.Reference for the given url.
  */
-export class StorageService {
-  private app_: FirebaseApp | null;
-  private readonly bucket_: Location | null = null;
-  private readonly internals_: ServiceInternals;
-  private readonly authProvider_: Provider<FirebaseAuthInternalName>;
-  private readonly appId_: string | null = null;
-  private readonly pool_: XhrIoPool;
-  private readonly requests_: Set<Request<unknown>>;
-  private deleted_: boolean = false;
-  private maxOperationRetryTime_: number;
-  private maxUploadRetryTime_: number;
+function refFromURL(service: StorageService, url: string): Reference {
+  return new Reference(service, url);
+}
+
+/**
+ * Returns a firebaseStorage.Reference for the given path in the default
+ * bucket.
+ */
+function refFromPath(
+  ref: StorageService | Reference,
+  path?: string
+): Reference {
+  if (ref instanceof StorageService) {
+    const service = ref;
+    if (service._bucket == null) {
+      throw noDefaultBucket();
+    }
+    const reference = new Reference(service, service._bucket!);
+    if (path != null) {
+      return refFromPath(reference, path);
+    } else {
+      return reference;
+    }
+  } else {
+    // ref is a Reference
+    if (path !== undefined) {
+      if (path.includes('..')) {
+        throw invalidArgument('`path` param cannot contain ".."');
+      }
+      return _getChild(ref, path);
+    } else {
+      return ref;
+    }
+  }
+}
+
+/**
+ * Returns a storage Reference for the given url.
+ * @param storage - `Storage` instance.
+ * @param url - URL. If empty, returns root reference.
+ * @public
+ */
+export function ref(storage: StorageService, url?: string): Reference;
+/**
+ * Returns a storage Reference for the given path in the
+ * default bucket.
+ * @param storageOrRef - `Storage` service or storage `Reference`.
+ * @param pathOrUrlStorage - path. If empty, returns root reference (if Storage
+ * instance provided) or returns same reference (if Reference provided).
+ * @public
+ */
+export function ref(
+  storageOrRef: StorageService | Reference,
+  path?: string
+): Reference;
+export function ref(
+  serviceOrRef: StorageService | Reference,
+  pathOrUrl?: string
+): Reference | null {
+  if (pathOrUrl && isUrl(pathOrUrl)) {
+    if (serviceOrRef instanceof StorageService) {
+      return refFromURL(serviceOrRef, pathOrUrl);
+    } else {
+      throw invalidArgument(
+        'To use ref(service, url), the first argument must be a Storage instance.'
+      );
+    }
+  } else {
+    return refFromPath(serviceOrRef, pathOrUrl);
+  }
+}
+
+function extractBucket(
+  host: string,
+  config?: FirebaseOptions
+): Location | null {
+  const bucketString = config?.[CONFIG_STORAGE_BUCKET_KEY];
+  if (bucketString == null) {
+    return null;
+  }
+  return Location.makeFromBucketSpec(bucketString, host);
+}
+
+export function connectStorageEmulator(
+  storage: StorageService,
+  host: string,
+  port: number
+): void {
+  storage.host = `http://${host}:${port}`;
+}
+
+/**
+ * A service that provides Firebase Storage Reference instances.
+ * @public
+ * @param opt_url - gs:// url to a custom Storage Bucket
+ */
+export class StorageService implements _FirebaseService {
+  _bucket: Location | null = null;
+  /**
+   * This string can be in the formats:
+   * - host
+   * - host:port
+   * - protocol://host:port
+   */
+  private _host: string = DEFAULT_HOST;
+  protected readonly _appId: string | null = null;
+  private readonly _requests: Set<Request<unknown>>;
+  private _deleted: boolean = false;
+  private _maxOperationRetryTime: number;
+  private _maxUploadRetryTime: number;
 
   constructor(
-    app: FirebaseApp | null,
-    authProvider: Provider<FirebaseAuthInternalName>,
-    pool: XhrIoPool,
-    url?: string
+    /**
+     * FirebaseApp associated with this StorageService instance.
+     */
+    readonly app: FirebaseApp,
+    readonly _authProvider: Provider<FirebaseAuthInternalName>,
+    /**
+     * @internal
+     */
+    readonly _appCheckProvider: Provider<AppCheckInternalComponentName>,
+    /**
+     * @internal
+     */
+    readonly _pool: ConnectionPool,
+    readonly _url?: string,
+    readonly _firebaseVersion?: string
   ) {
-    this.app_ = app;
-    this.authProvider_ = authProvider;
-    this.maxOperationRetryTime_ = constants.DEFAULT_MAX_OPERATION_RETRY_TIME;
-    this.maxUploadRetryTime_ = constants.DEFAULT_MAX_UPLOAD_RETRY_TIME;
-    this.requests_ = new Set();
-    this.pool_ = pool;
-    if (url != null) {
-      this.bucket_ = Location.makeFromBucketSpec(url);
+    this._maxOperationRetryTime = DEFAULT_MAX_OPERATION_RETRY_TIME;
+    this._maxUploadRetryTime = DEFAULT_MAX_UPLOAD_RETRY_TIME;
+    this._requests = new Set();
+    if (_url != null) {
+      this._bucket = Location.makeFromBucketSpec(_url, this._host);
     } else {
-      this.bucket_ = StorageService.extractBucket_(this.app_?.options);
+      this._bucket = extractBucket(this._host, this.app.options);
     }
-    this.internals_ = new ServiceInternals(this);
   }
 
-  private static extractBucket_(config?: FirebaseOptions): Location | null {
-    const bucketString = config?.[constants.CONFIG_STORAGE_BUCKET_KEY];
-    if (bucketString == null) {
-      return null;
-    }
-    return Location.makeFromBucketSpec(bucketString);
+  get host(): string {
+    return this._host;
   }
 
-  async getAuthToken(): Promise<string | null> {
-    const auth = this.authProvider_.getImmediate({ optional: true });
+  /**
+   * Set host string for this service.
+   * @param host - host string in the form of host, host:port,
+   * or protocol://host:port
+   */
+  set host(host: string) {
+    this._host = host;
+    if (this._url != null) {
+      this._bucket = Location.makeFromBucketSpec(this._url, host);
+    } else {
+      this._bucket = extractBucket(host, this.app.options);
+    }
+  }
+
+  /**
+   * The maximum time to retry uploads in milliseconds.
+   */
+  get maxUploadRetryTime(): number {
+    return this._maxUploadRetryTime;
+  }
+
+  set maxUploadRetryTime(time: number) {
+    validateNumber(
+      'time',
+      /* minValue=*/ 0,
+      /* maxValue= */ Number.POSITIVE_INFINITY,
+      time
+    );
+    this._maxUploadRetryTime = time;
+  }
+
+  /**
+   * The maximum time to retry operations other than uploads or downloads in
+   * milliseconds.
+   */
+  get maxOperationRetryTime(): number {
+    return this._maxOperationRetryTime;
+  }
+
+  set maxOperationRetryTime(time: number) {
+    validateNumber(
+      'time',
+      /* minValue=*/ 0,
+      /* maxValue= */ Number.POSITIVE_INFINITY,
+      time
+    );
+    this._maxOperationRetryTime = time;
+  }
+
+  async _getAuthToken(): Promise<string | null> {
+    const auth = this._authProvider.getImmediate({ optional: true });
     if (auth) {
       const tokenData = await auth.getToken();
       if (tokenData !== null) {
@@ -86,147 +252,75 @@ export class StorageService {
     return null;
   }
 
+  async _getAppCheckToken(): Promise<string | null> {
+    const appCheck = this._appCheckProvider.getImmediate({ optional: true });
+    if (appCheck) {
+      const result = await appCheck.getToken();
+      // TODO: What do we want to do if there is an error getting the token?
+      // Context: appCheck.getToken() will never throw even if an error happened. In the error case, a dummy token will be
+      // returned along with an error field describing the error. In general, we shouldn't care about the error condition and just use
+      // the token (actual or dummy) to send requests.
+      return result.token;
+    }
+    return null;
+  }
+
   /**
    * Stop running requests and prevent more from being created.
    */
-  deleteApp(): void {
-    this.deleted_ = true;
-    this.app_ = null;
-    this.requests_.forEach(request => request.cancel());
-    this.requests_.clear();
+  _delete(): Promise<void> {
+    this._deleted = true;
+    this._requests.forEach(request => request.cancel());
+    this._requests.clear();
+    return Promise.resolve();
   }
 
   /**
    * Returns a new firebaseStorage.Reference object referencing this StorageService
    * at the given Location.
-   * @param loc The Location.
-   * @return A firebaseStorage.Reference.
    */
-  makeStorageReference(loc: Location): Reference {
+  _makeStorageReference(loc: Location): Reference {
     return new Reference(this, loc);
   }
 
-  makeRequest<T>(
+  /**
+   * @param requestInfo - HTTP RequestInfo object
+   * @param authToken - Firebase auth token
+   */
+  _makeRequest<T>(
     requestInfo: RequestInfo<T>,
-    authToken: string | null
+    authToken: string | null,
+    appCheckToken: string | null
   ): Request<T> {
-    if (!this.deleted_) {
+    if (!this._deleted) {
       const request = makeRequest(
         requestInfo,
-        this.appId_,
+        this._appId,
         authToken,
-        this.pool_
+        appCheckToken,
+        this._pool,
+        this._firebaseVersion
       );
-      this.requests_.add(request);
+      this._requests.add(request);
       // Request removes itself from set when complete.
       request.getPromise().then(
-        () => this.requests_.delete(request),
-        () => this.requests_.delete(request)
+        () => this._requests.delete(request),
+        () => this._requests.delete(request)
       );
       return request;
     } else {
-      return new FailRequest(errorsExports.appDeleted());
+      return new FailRequest(appDeleted());
     }
   }
 
-  /**
-   * Returns a firebaseStorage.Reference for the given path in the default
-   * bucket.
-   */
-  ref(path?: string): Reference {
-    function validator(path: unknown): void {
-      if (typeof path !== 'string') {
-        throw 'Path is not a string.';
-      }
-      if (/^[A-Za-z]+:\/\//.test(path as string)) {
-        throw 'Expected child path but got a URL, use refFromURL instead.';
-      }
-    }
-    args.validate('ref', [args.stringSpec(validator, true)], arguments);
-    if (this.bucket_ == null) {
-      throw new Error('No Storage Bucket defined in Firebase Options.');
-    }
+  async makeRequestWithTokens<T>(
+    requestInfo: RequestInfo<T>
+  ): Promise<Request<T>> {
+    const [authToken, appCheckToken] = await Promise.all([
+      this._getAuthToken(),
+      this._getAppCheckToken()
+    ]);
 
-    const ref = new Reference(this, this.bucket_);
-    if (path != null) {
-      return ref.child(path);
-    } else {
-      return ref;
-    }
-  }
-
-  /**
-   * Returns a firebaseStorage.Reference object for the given absolute URL,
-   * which must be a gs:// or http[s]:// URL.
-   */
-  refFromURL(url: string): Reference {
-    function validator(p: unknown): void {
-      if (typeof p !== 'string') {
-        throw 'Path is not a string.';
-      }
-      if (!/^[A-Za-z]+:\/\//.test(p as string)) {
-        throw 'Expected full URL but got a child path, use ref instead.';
-      }
-      try {
-        Location.makeFromUrl(p as string);
-      } catch (e) {
-        throw 'Expected valid full URL but got an invalid one.';
-      }
-    }
-    args.validate('refFromURL', [args.stringSpec(validator, false)], arguments);
-    return new Reference(this, url);
-  }
-
-  get maxUploadRetryTime(): number {
-    return this.maxUploadRetryTime_;
-  }
-
-  setMaxUploadRetryTime(time: number): void {
-    args.validate(
-      'setMaxUploadRetryTime',
-      [args.nonNegativeNumberSpec()],
-      arguments
-    );
-    this.maxUploadRetryTime_ = time;
-  }
-
-  get maxOperationRetryTime(): number {
-    return this.maxOperationRetryTime_;
-  }
-
-  setMaxOperationRetryTime(time: number): void {
-    args.validate(
-      'setMaxOperationRetryTime',
-      [args.nonNegativeNumberSpec()],
-      arguments
-    );
-    this.maxOperationRetryTime_ = time;
-  }
-
-  get app(): FirebaseApp | null {
-    return this.app_;
-  }
-
-  get INTERNAL(): ServiceInternals {
-    return this.internals_;
-  }
-}
-
-/**
- * @struct
- */
-export class ServiceInternals {
-  service_: StorageService;
-
-  constructor(service: StorageService) {
-    this.service_ = service;
-  }
-
-  /**
-   * Called when the associated app is deleted.
-   */
-  delete(): Promise<void> {
-    this.service_.deleteApp();
-    return Promise.resolve();
+    return this._makeRequest(requestInfo, authToken, appCheckToken);
   }
 }

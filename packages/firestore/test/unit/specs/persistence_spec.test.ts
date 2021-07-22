@@ -15,9 +15,9 @@
  * limitations under the License.
  */
 
+import { TimerId } from '../../../src/util/async_queue';
 import { doc, query } from '../../util/helpers';
 
-import { TimerId } from '../../../src/util/async_queue';
 import { describeSpec, specTest } from './describe_spec';
 import { client, spec } from './spec_builder';
 
@@ -51,18 +51,8 @@ describeSpec('Persistence:', [], () => {
           .userListens(query1)
           .expectEvents(query1, {
             added: [
-              doc(
-                'collection/key1',
-                0,
-                { foo: 'bar' },
-                { hasLocalMutations: true }
-              ),
-              doc(
-                'collection/key2',
-                0,
-                { baz: 'quu' },
-                { hasLocalMutations: true }
-              )
+              doc('collection/key1', 0, { foo: 'bar' }).setHasLocalMutations(),
+              doc('collection/key2', 0, { baz: 'quu' }).setHasLocalMutations()
             ],
             fromCache: true,
             hasPendingWrites: true
@@ -79,7 +69,7 @@ describeSpec('Persistence:', [], () => {
       .watchAcksFull(query1, 1000, doc1)
       .expectEvents(query1, { added: [doc1] })
       .restart()
-      .userListens(query1, 'resume-token-1000')
+      .userListens(query1, { resumeToken: 'resume-token-1000' })
       .expectEvents(query1, { added: [doc1], fromCache: true });
   });
 
@@ -94,7 +84,7 @@ describeSpec('Persistence:', [], () => {
         .expectEvents(query1, { added: [doc1] })
         // Normally this would clear the cached remote documents.
         .userUnlistens(query1)
-        .userListens(query1, 'resume-token-1000')
+        .userListens(query1, { resumeToken: 'resume-token-1000' })
         .expectEvents(query1, { added: [doc1], fromCache: true })
     );
   });
@@ -111,12 +101,9 @@ describeSpec('Persistence:', [], () => {
         // Version is 0 since we never received a server version via watch.
         .expectEvents(query1, {
           added: [
-            doc(
-              'collection/key',
-              1000,
-              { foo: 'bar' },
-              { hasCommittedMutations: true }
-            )
+            doc('collection/key', 1000, {
+              foo: 'bar'
+            }).setHasCommittedMutations()
           ],
           fromCache: true
         })
@@ -164,18 +151,12 @@ describeSpec('Persistence:', [], () => {
   specTest('Visible mutations reflect uid switches', [], () => {
     const query1 = query('users');
     const existingDoc = doc('users/existing', 0, { uid: 'existing' });
-    const anonDoc = doc(
-      'users/anon',
-      0,
-      { uid: 'anon' },
-      { hasLocalMutations: true }
-    );
-    const user1Doc = doc(
-      'users/user1',
-      0,
-      { uid: 'user1' },
-      { hasLocalMutations: true }
-    );
+    const anonDoc = doc('users/anon', 0, {
+      uid: 'anon'
+    }).setHasLocalMutations();
+    const user1Doc = doc('users/user1', 0, {
+      uid: 'user1'
+    }).setHasLocalMutations();
     return (
       spec()
         .userListens(query1)

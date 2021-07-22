@@ -18,9 +18,8 @@
 import {
   FirebaseApp,
   FirebaseOptions,
-  FirebaseAppConfig,
-  _FirebaseAppInternal
-} from '@firebase/app-types-exp';
+  FirebaseAppConfig
+} from './public-types';
 import { DEFAULT_ENTRY_NAME, PLATFORM_LOG_STRING } from './constants';
 import { ERROR_FACTORY, AppError } from './errors';
 import {
@@ -29,12 +28,12 @@ import {
   Name,
   ComponentType
 } from '@firebase/component';
-import { version } from '../../../packages/firebase/package.json';
+import { version } from '../../firebase-exp/package.json';
 import { FirebaseAppImpl } from './firebaseApp';
 import { _apps, _components, _registerComponent } from './internal';
 import { logger } from './logger';
 import {
-  LogLevel,
+  LogLevelString,
   setLogLevel as setLogLevelImpl,
   LogCallback,
   LogOptions,
@@ -214,11 +213,11 @@ export async function deleteApp(app: FirebaseApp): Promise<void> {
   if (_apps.has(name)) {
     _apps.delete(name);
     await Promise.all(
-      (app as _FirebaseAppInternal).container
+      (app as FirebaseAppImpl).container
         .getProviders()
         .map(provider => provider.delete())
     );
-    (app as _FirebaseAppInternal).isDeleted = true;
+    (app as FirebaseAppImpl).isDeleted = true;
   }
 }
 
@@ -284,9 +283,7 @@ export function onLog(
   options?: LogOptions
 ): void {
   if (logCallback !== null && typeof logCallback !== 'function') {
-    throw ERROR_FACTORY.create(AppError.INVALID_LOG_ARGUMENT, {
-      appName: name
-    });
+    throw ERROR_FACTORY.create(AppError.INVALID_LOG_ARGUMENT);
   }
   setUserLogHandler(logCallback, options);
 }
@@ -300,8 +297,6 @@ export function onLog(
  *
  * @public
  */
-export function setLogLevel(logLevel: LogLevel): void {
+export function setLogLevel(logLevel: LogLevelString): void {
   setLogLevelImpl(logLevel);
 }
-
-export { LogLevel } from '@firebase/logger';

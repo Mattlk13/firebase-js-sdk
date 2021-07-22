@@ -14,154 +14,117 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+// eslint-disable-next-line import/no-extraneous-dependencies
 
-import { fatal } from '../core/util/util';
-import { parseRepoInfo } from '../core/util/libs/parser';
-import { Path } from '../core/util/Path';
-import { Reference } from './Reference';
-import { Repo } from '../core/Repo';
-import { RepoManager } from '../core/RepoManager';
-import { validateArgCount } from '@firebase/util';
-import { validateUrl } from '../core/util/validation';
 import { FirebaseApp } from '@firebase/app-types';
 import { FirebaseService } from '@firebase/app-types/private';
-import { RepoInfo } from '../core/RepoInfo';
-import { FirebaseDatabase } from '@firebase/database-types';
+import {
+  validateArgCount,
+  Compat,
+  EmulatorMockTokenOptions
+} from '@firebase/util';
+
+import {
+  goOnline,
+  connectDatabaseEmulator,
+  goOffline,
+  ref,
+  refFromURL,
+  increment,
+  serverTimestamp
+} from '../../exp/index'; // import from the exp public API
+
+import { Reference } from './Reference';
+
+// TODO: revert to import {FirebaseDatabase as ExpDatabase} from '@firebase/database' once modular SDK goes GA
+/**
+ * This is a workaround for an issue in the no-modular '@firebase/database' where its typings
+ * reference types from `@firebase/app-exp`.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type ExpDatabase = any;
 
 /**
  * Class representing a firebase database.
- * @implements {FirebaseService}
  */
-export class Database implements FirebaseService {
-  INTERNAL: DatabaseInternals;
-  private root_: Reference;
-
+export class Database implements FirebaseService, Compat<ExpDatabase> {
   static readonly ServerValue = {
-    TIMESTAMP: {
-      '.sv': 'timestamp'
-    },
-    increment: (delta: number) => {
-      return {
-        '.sv': {
-          'increment': delta
-        }
-      };
-    }
+    TIMESTAMP: serverTimestamp(),
+    increment: (delta: number) => increment(delta)
   };
 
   /**
    * The constructor should not be called by users of our public API.
-   * @param {!Repo} repo_
    */
-  constructor(private repo_: Repo) {
-    if (!(repo_ instanceof Repo)) {
-      fatal(
-        "Don't call new Database() directly - please use firebase.database()."
-      );
-    }
+  constructor(readonly _delegate: ExpDatabase, readonly app: FirebaseApp) {}
 
-    /** @type {Reference} */
-    this.root_ = new Reference(repo_, Path.Empty);
+  INTERNAL = {
+    delete: () => this._delegate._delete()
+  };
 
-    this.INTERNAL = new DatabaseInternals(this);
-  }
-
-  get app(): FirebaseApp {
-    return this.repo_.app;
+  /**
+   * Modify this instance to communicate with the Realtime Database emulator.
+   *
+   * <p>Note: This method must be called before performing any other operation.
+   *
+   * @param host - the emulator host (ex: localhost)
+   * @param port - the emulator port (ex: 8080)
+   * @param options.mockUserToken - the mock auth token to use for unit testing Security Rules
+   */
+  useEmulator(
+    host: string,
+    port: number,
+    options: {
+      mockUserToken?: EmulatorMockTokenOptions;
+    } = {}
+  ): void {
+    connectDatabaseEmulator(this._delegate, host, port, options);
   }
 
   /**
    * Returns a reference to the root or to the path specified in the provided
    * argument.
    *
-   * @param {string|Reference=} path The relative string path or an existing
-   * Reference to a database location.
+   * @param path - The relative string path or an existing Reference to a database
+   * location.
    * @throws If a Reference is provided, throws if it does not belong to the
    * same project.
-   * @return {!Reference} Firebase reference.
+   * @returns Firebase reference.
    */
   ref(path?: string): Reference;
   ref(path?: Reference): Reference;
   ref(path?: string | Reference): Reference {
-    this.checkDeleted_('ref');
     validateArgCount('database.ref', 0, 1, arguments.length);
-
     if (path instanceof Reference) {
-      return this.refFromURL(path.toString());
+      const childRef = refFromURL(this._delegate, path.toString());
+      return new Reference(this, childRef);
+    } else {
+      const childRef = ref(this._delegate, path);
+      return new Reference(this, childRef);
     }
-
-    return path !== undefined ? this.root_.child(path) : this.root_;
   }
 
   /**
    * Returns a reference to the root or the path specified in url.
    * We throw a exception if the url is not in the same domain as the
    * current repo.
-   * @param {string} url
-   * @return {!Reference} Firebase reference.
+   * @returns Firebase reference.
    */
   refFromURL(url: string): Reference {
-    /** @const {string} */
     const apiName = 'database.refFromURL';
-    this.checkDeleted_(apiName);
     validateArgCount(apiName, 1, 1, arguments.length);
-    const parsedURL = parseRepoInfo(url);
-    validateUrl(apiName, 1, parsedURL);
-
-    const repoInfo = parsedURL.repoInfo;
-    if (repoInfo.host !== (this.repo_.repoInfo_ as RepoInfo).host) {
-      fatal(
-        apiName +
-          ': Host name does not match the current database: ' +
-          '(found ' +
-          repoInfo.host +
-          ' but expected ' +
-          (this.repo_.repoInfo_ as RepoInfo).host +
-          ')'
-      );
-    }
-
-    return this.ref(parsedURL.path.toString());
-  }
-
-  /**
-   * @param {string} apiName
-   */
-  private checkDeleted_(apiName: string) {
-    if (this.repo_ === null) {
-      fatal('Cannot call ' + apiName + ' on a deleted database.');
-    }
+    const childRef = refFromURL(this._delegate, url);
+    return new Reference(this, childRef);
   }
 
   // Make individual repo go offline.
-  goOffline() {
+  goOffline(): void {
     validateArgCount('database.goOffline', 0, 0, arguments.length);
-    this.checkDeleted_('goOffline');
-    this.repo_.interrupt();
+    return goOffline(this._delegate);
   }
 
-  goOnline() {
+  goOnline(): void {
     validateArgCount('database.goOnline', 0, 0, arguments.length);
-    this.checkDeleted_('goOnline');
-    this.repo_.resume();
-  }
-}
-
-export class DatabaseInternals {
-  /** @param {!Database} database */
-  constructor(public database: Database) {}
-
-  /** @return {Promise<void>} */
-  async delete(): Promise<void> {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (this.database as any).checkDeleted_('delete');
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    RepoManager.getInstance().deleteRepo((this.database as any).repo_ as Repo);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (this.database as any).repo_ = null;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (this.database as any).root_ = null;
-    this.database.INTERNAL = null;
-    this.database = null;
+    return goOnline(this._delegate);
   }
 }

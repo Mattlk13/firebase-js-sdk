@@ -19,13 +19,55 @@ import { Metadata } from './metadata';
 import { Reference } from './reference';
 import { UploadTask } from './task';
 
-export class UploadTaskSnapshot {
-  constructor(
-    readonly bytesTransferred: number,
-    readonly totalBytes: number,
-    readonly state: TaskState,
-    readonly metadata: Metadata | null,
-    readonly task: UploadTask,
-    readonly ref: Reference
-  ) {}
+/**
+ * Result returned from a non-resumable upload.
+ * @public
+ */
+export interface UploadResult {
+  /**
+   * Contains the metadata sent back from the server.
+   */
+  readonly metadata: Metadata;
+
+  /**
+   * The reference that spawned this upload.
+   */
+  readonly ref: Reference;
+}
+
+/**
+ * Holds data about the current state of the upload task.
+ * @public
+ */
+export interface UploadTaskSnapshot {
+  /**
+   * The number of bytes that have been successfully uploaded so far.
+   */
+  readonly bytesTransferred: number;
+
+  /**
+   * The total number of bytes to be uploaded.
+   */
+  readonly totalBytes: number;
+
+  /**
+   * The current state of the task.
+   */
+  readonly state: TaskState;
+
+  /**
+   * Before the upload completes, contains the metadata sent to the server.
+   * After the upload completes, contains the metadata sent back from the server.
+   */
+  readonly metadata: Metadata;
+
+  /**
+   * The task of which this is a snapshot.
+   */
+  readonly task: UploadTask;
+
+  /**
+   * The reference that spawned this snapshot's upload task.
+   */
+  readonly ref: Reference;
 }

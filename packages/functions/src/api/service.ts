@@ -29,6 +29,7 @@ import { Serializer } from '../serializer';
 import { Provider } from '@firebase/component';
 import { FirebaseAuthInternalName } from '@firebase/auth-interop-types';
 import { FirebaseMessagingName } from '@firebase/messaging-types';
+import { AppCheckInternalComponentName } from '@firebase/app-check-interop-types';
 
 /**
  * The response to an http request.
@@ -86,17 +87,23 @@ export class Service implements FirebaseFunctions, FirebaseService {
   private emulatorOrigin: string | null = null;
   private cancelAllRequests: Promise<void>;
   private deleteService!: () => void;
+  private region: string;
+  private customDomain: string | null;
 
   /**
-   * Creates a new Functions service for the given app and (optional) region.
+   * Creates a new Functions service for the given app and (optional) region or custom domain.
    * @param app_ The FirebaseApp to use.
-   * @param region_ The region to call functions in.
+   * @param regionOrCustomDomain_ one of:
+   *   a) A region to call functions from, such as us-central1
+   *   b) A custom domain to use as a functions prefix, such as https://mydomain.com
    */
   constructor(
     private app_: FirebaseApp,
     authProvider: Provider<FirebaseAuthInternalName>,
     messagingProvider: Provider<FirebaseMessagingName>,
-    private region_: string = 'us-central1'
+    private appCheckProvider: Provider<AppCheckInternalComponentName>,
+    regionOrCustomDomain_: string = 'us-central1',
+    readonly fetchImpl: typeof fetch
   ) {
     this.contextProvider = new ContextProvider(authProvider, messagingProvider);
     // Cancels all ongoing requests when resolved.
@@ -105,6 +112,16 @@ export class Service implements FirebaseFunctions, FirebaseService {
         return resolve();
       };
     });
+
+    // Resolve the region or custom domain overload by attempting to parse it.
+    try {
+      const url = new URL(regionOrCustomDomain_);
+      this.customDomain = url.origin;
+      this.region = 'us-central1';
+    } catch (e) {
+      this.customDomain = null;
+      this.region = regionOrCustomDomain_;
+    }
   }
 
   get app(): FirebaseApp {
@@ -123,18 +140,35 @@ export class Service implements FirebaseFunctions, FirebaseService {
    */
   _url(name: string): string {
     const projectId = this.app_.options.projectId;
-    const region = this.region_;
     if (this.emulatorOrigin !== null) {
       const origin = this.emulatorOrigin;
-      return `${origin}/${projectId}/${region}/${name}`;
+      return `${origin}/${projectId}/${this.region}/${name}`;
     }
-    return `https://${region}-${projectId}.cloudfunctions.net/${name}`;
+
+    if (this.customDomain !== null) {
+      return `${this.customDomain}/${name}`;
+    }
+
+    return `https://${this.region}-${projectId}.cloudfunctions.net/${name}`;
+  }
+
+  /**
+   * Modify this instance to communicate with the Cloud Functions emulator.
+   *
+   * Note: this must be called before this instance has been used to do any operations.
+   *
+   * @param host The emulator host (ex: localhost)
+   * @param port The emulator port (ex: 5001)
+   */
+  useEmulator(host: string, port: number): void {
+    this.emulatorOrigin = `http://${host}:${port}`;
   }
 
   /**
    * Changes this instance to point to a Cloud Functions emulator running
    * locally. See https://firebase.google.com/docs/functions/local-emulator
    *
+   * @deprecated Prefer the useEmulator(host, port) method.
    * @param origin The origin of the local emulator, such as
    * "http://localhost:5005".
    */
@@ -162,13 +196,18 @@ export class Service implements FirebaseFunctions, FirebaseService {
   private async postJSON(
     url: string,
     body: {},
-    headers: Headers
+    headers: { [key: string]: string }
   ): Promise<HttpResponse> {
-    headers.append('Content-Type', 'application/json');
+    headers['Content-Type'] = 'application/json';
+
+    const appCheckToken = await this.getAppCheckToken();
+    if (appCheckToken !== null) {
+      headers['X-Firebase-AppCheck'] = appCheckToken;
+    }
 
     let response: Response;
     try {
-      response = await fetch(url, {
+      response = await this.fetchImpl(url, {
         method: 'POST',
         body: JSON.stringify(body),
         headers
@@ -195,6 +234,19 @@ export class Service implements FirebaseFunctions, FirebaseService {
     };
   }
 
+  private async getAppCheckToken(): Promise<string | null> {
+    const appCheck = this.appCheckProvider.getImmediate({ optional: true });
+    if (appCheck) {
+      const result = await appCheck.getToken();
+      // If getToken() fails, it will still return a dummy token that also has
+      // an error field containing the error message. We will send any token
+      // provided here and show an error if/when it is rejected by the functions
+      // endpoint.
+      return result.token;
+    }
+    return null;
+  }
+
   /**
    * Calls a callable function asynchronously and returns the result.
    * @param name The name of the callable trigger.
@@ -212,13 +264,13 @@ export class Service implements FirebaseFunctions, FirebaseService {
     const body = { data };
 
     // Add a header for the authToken.
-    const headers = new Headers();
+    const headers: { [key: string]: string } = {};
     const context = await this.contextProvider.getContext();
     if (context.authToken) {
-      headers.append('Authorization', 'Bearer ' + context.authToken);
+      headers['Authorization'] = 'Bearer ' + context.authToken;
     }
     if (context.instanceIdToken) {
-      headers.append('Firebase-Instance-ID-Token', context.instanceIdToken);
+      headers['Firebase-Instance-ID-Token'] = context.instanceIdToken;
     }
 
     // Default timeout to 70s, but let the options override it.

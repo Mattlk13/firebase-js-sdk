@@ -16,6 +16,7 @@
  */
 
 import { expect } from 'chai';
+
 import * as firebaseExport from '../util/firebase_export';
 import {
   apiDescribe,
@@ -28,9 +29,7 @@ import {
 import { DEFAULT_SETTINGS } from '../util/settings';
 
 const FieldPath = firebaseExport.FieldPath;
-const FieldValue = firebaseExport.FieldValue;
 const Timestamp = firebaseExport.Timestamp;
-const usesFunctionalApi = firebaseExport.usesFunctionalApi;
 
 // Allow custom types for testing.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -354,44 +353,6 @@ apiDescribe('Timestamp Fields in snapshots', (persistence: boolean) => {
     return { timestamp: ts, nested: { timestamp2: ts } };
   };
 
-  // timestampInSnapshots is not support in the modular API.
-  // eslint-disable-next-line no-restricted-properties
-  (usesFunctionalApi() ? it.skip : it)(
-    'are returned as native dates if timestampsInSnapshots set to false',
-    () => {
-      const settings = { ...DEFAULT_SETTINGS };
-      settings['timestampsInSnapshots'] = false;
-
-      const timestamp = new Timestamp(100, 123456789);
-      const testDocs = { a: testDataWithTimestamps(timestamp) };
-      return withTestCollectionSettings(
-        persistence,
-        settings,
-        testDocs,
-        coll => {
-          return coll
-            .doc('a')
-            .get()
-            .then(docSnap => {
-              expect(docSnap.get('timestamp'))
-                .to.be.a('date')
-                .that.deep.equals(timestamp.toDate());
-              expect(docSnap.data()!['timestamp'])
-                .to.be.a('date')
-                .that.deep.equals(timestamp.toDate());
-
-              expect(docSnap.get('nested.timestamp2'))
-                .to.be.a('date')
-                .that.deep.equals(timestamp.toDate());
-              expect(docSnap.data()!['nested']['timestamp2'])
-                .to.be.a('date')
-                .that.deep.equals(timestamp.toDate());
-            });
-        }
-      );
-    }
-  );
-
   it('are returned as Timestamps', () => {
     const timestamp = new Timestamp(100, 123456000);
     // Timestamps are currently truncated to microseconds after being written to
@@ -423,37 +384,6 @@ apiDescribe('Timestamp Fields in snapshots', (persistence: boolean) => {
         });
     });
   });
-
-  // timestampInSnapshots is not support in the modular API.
-  // eslint-disable-next-line no-restricted-properties
-  (usesFunctionalApi() ? it.skip : it)(
-    'timestampsInSnapshots affects server timestamps',
-    () => {
-      const settings = { ...DEFAULT_SETTINGS };
-      settings['timestampsInSnapshots'] = false;
-      const testDocs = {
-        a: { timestamp: FieldValue.serverTimestamp() }
-      };
-
-      return withTestCollectionSettings(
-        persistence,
-        settings,
-        testDocs,
-        coll => {
-          return coll
-            .doc('a')
-            .get()
-            .then(docSnap => {
-              expect(
-                docSnap.get('timestamp', {
-                  serverTimestamps: 'estimate'
-                })
-              ).to.be.an.instanceof(Date);
-            });
-        }
-      );
-    }
-  );
 });
 
 apiDescribe('`undefined` properties', (persistence: boolean) => {
@@ -465,6 +395,15 @@ apiDescribe('`undefined` properties', (persistence: boolean) => {
       await doc.set({ foo: 'foo', 'bar': undefined });
       const docSnap = await doc.get();
       expect(docSnap.data()).to.deep.equal({ foo: 'foo' });
+    });
+  });
+
+  it('are ignored in set({ merge: true })', () => {
+    return withTestDocAndSettings(persistence, settings, async doc => {
+      await doc.set({ foo: 'foo', bar: 'unchanged' });
+      await doc.set({ foo: 'foo', bar: undefined }, { merge: true });
+      const docSnap = await doc.get();
+      expect(docSnap.data()).to.deep.equal({ foo: 'foo', bar: 'unchanged' });
     });
   });
 

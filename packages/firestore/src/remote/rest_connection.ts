@@ -15,14 +15,15 @@
  * limitations under the License.
  */
 
+import { SDK_VERSION } from '../../src/core/version';
 import { Token } from '../api/credentials';
 import { DatabaseId, DatabaseInfo } from '../core/database_info';
-import { SDK_VERSION } from '../../src/core/version';
-import { Connection, Stream } from './connection';
-import { logDebug, logWarn } from '../util/log';
-import { FirestoreError } from '../util/error';
-import { StringMap } from '../util/types';
 import { debugAssert } from '../util/assert';
+import { FirestoreError } from '../util/error';
+import { logDebug, logWarn } from '../util/log';
+import { StringMap } from '../util/types';
+
+import { Connection, Stream } from './connection';
 
 const LOG_TAG = 'RestConnection';
 
@@ -38,8 +39,12 @@ RPC_NAME_URL_MAPPING['Commit'] = 'commit';
 RPC_NAME_URL_MAPPING['RunQuery'] = 'runQuery';
 
 const RPC_URL_VERSION = 'v1';
-const X_GOOG_API_CLIENT_VALUE = 'gl-js/ fire/' + SDK_VERSION;
 
+// SDK_VERSION is updated to different value at runtime depending on the entry point,
+// so we need to get its value when we need it in a function.
+function getGoogApiClientValue(): string {
+  return 'gl-js/ fire/' + SDK_VERSION;
+}
 /**
  * Base class for all Rest-based connections to the backend (WebChannel and
  * HTTP).
@@ -117,14 +122,17 @@ export abstract class RestConnection implements Connection {
     headers: StringMap,
     token: Token | null
   ): void {
-    headers['X-Goog-Api-Client'] = X_GOOG_API_CLIENT_VALUE;
+    headers['X-Goog-Api-Client'] = getGoogApiClientValue();
 
     // Content-Type: text/plain will avoid preflight requests which might
     // mess with CORS and redirects by proxies. If we add custom headers
     // we will need to change this code to potentially use the $httpOverwrite
-    // parameter supported by ESF to avoid	triggering preflight requests.
+    // parameter supported by ESF to avoid triggering preflight requests.
     headers['Content-Type'] = 'text/plain';
 
+    if (this.databaseInfo.appId) {
+      headers['X-Firebase-GMPID'] = this.databaseInfo.appId;
+    }
     if (token) {
       for (const header in token.authHeaders) {
         if (token.authHeaders.hasOwnProperty(header)) {
@@ -144,7 +152,7 @@ export abstract class RestConnection implements Connection {
     body: Req
   ): Promise<Resp>;
 
-  private makeUrl<Req>(rpcName: string, path: string): string {
+  private makeUrl(rpcName: string, path: string): string {
     const urlRpcName = RPC_NAME_URL_MAPPING[rpcName];
     debugAssert(
       urlRpcName !== undefined,

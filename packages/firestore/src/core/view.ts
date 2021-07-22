@@ -15,19 +15,25 @@
  * limitations under the License.
  */
 
-import { QueryResult } from '../local/local_store';
+import { QueryResult } from '../local/local_store_impl';
 import {
   documentKeySet,
   DocumentKeySet,
-  MaybeDocumentMap
+  DocumentMap
 } from '../model/collections';
-import { Document, MaybeDocument } from '../model/document';
+import { Document } from '../model/document';
 import { DocumentKey } from '../model/document_key';
 import { DocumentSet } from '../model/document_set';
 import { TargetChange } from '../remote/remote_event';
 import { debugAssert, fail } from '../util/assert';
 
-import { newQueryComparator, Query, queryMatches } from './query';
+import {
+  hasLimitToFirst,
+  hasLimitToLast,
+  newQueryComparator,
+  Query,
+  queryMatches
+} from './query';
 import { OnlineState } from './types';
 import {
   ChangeType,
@@ -109,13 +115,13 @@ export class View {
    * what the new results should be, what the changes were, and whether we may
    * need to go back to the local cache for more results. Does not make any
    * changes to the view.
-   * @param docChanges The doc changes to apply to this view.
-   * @param previousChanges If this is being called with a refill, then start
+   * @param docChanges - The doc changes to apply to this view.
+   * @param previousChanges - If this is being called with a refill, then start
    *        with this set of docs and changes instead of the current view.
-   * @return a new set of docs, changes, and refill flag.
+   * @returns a new set of docs, changes, and refill flag.
    */
   computeDocChanges(
-    docChanges: MaybeDocumentMap,
+    docChanges: DocumentMap,
     previousChanges?: ViewDocumentChanges
   ): ViewDocumentChanges {
     const changeSet = previousChanges
@@ -140,103 +146,91 @@ export class View {
     // Note that this should never get used in a refill (when previousChanges is
     // set), because there will only be adds -- no deletes or updates.
     const lastDocInLimit =
-      this.query.hasLimitToFirst() && oldDocumentSet.size === this.query.limit
+      hasLimitToFirst(this.query) && oldDocumentSet.size === this.query.limit
         ? oldDocumentSet.last()
         : null;
     const firstDocInLimit =
-      this.query.hasLimitToLast() && oldDocumentSet.size === this.query.limit
+      hasLimitToLast(this.query) && oldDocumentSet.size === this.query.limit
         ? oldDocumentSet.first()
         : null;
 
-    docChanges.inorderTraversal(
-      (key: DocumentKey, newMaybeDoc: MaybeDocument) => {
-        const oldDoc = oldDocumentSet.get(key);
-        let newDoc = newMaybeDoc instanceof Document ? newMaybeDoc : null;
-        if (newDoc) {
-          debugAssert(
-            key.isEqual(newDoc.key),
-            'Mismatching keys found in document changes: ' +
-              key +
-              ' != ' +
-              newDoc.key
-          );
-          newDoc = queryMatches(this.query, newDoc) ? newDoc : null;
-        }
+    docChanges.inorderTraversal((key, entry) => {
+      const oldDoc = oldDocumentSet.get(key);
+      const newDoc = queryMatches(this.query, entry) ? entry : null;
 
-        const oldDocHadPendingMutations = oldDoc
-          ? this.mutatedKeys.has(oldDoc.key)
-          : false;
-        const newDocHasPendingMutations = newDoc
-          ? newDoc.hasLocalMutations ||
-            // We only consider committed mutations for documents that were
-            // mutated during the lifetime of the view.
-            (this.mutatedKeys.has(newDoc.key) && newDoc.hasCommittedMutations)
-          : false;
+      const oldDocHadPendingMutations = oldDoc
+        ? this.mutatedKeys.has(oldDoc.key)
+        : false;
+      const newDocHasPendingMutations = newDoc
+        ? newDoc.hasLocalMutations ||
+          // We only consider committed mutations for documents that were
+          // mutated during the lifetime of the view.
+          (this.mutatedKeys.has(newDoc.key) && newDoc.hasCommittedMutations)
+        : false;
 
-        let changeApplied = false;
+      let changeApplied = false;
 
-        // Calculate change
-        if (oldDoc && newDoc) {
-          const docsEqual = oldDoc.data().isEqual(newDoc.data());
-          if (!docsEqual) {
-            if (!this.shouldWaitForSyncedDocument(oldDoc, newDoc)) {
-              changeSet.track({
-                type: ChangeType.Modified,
-                doc: newDoc
-              });
-              changeApplied = true;
-
-              if (
-                (lastDocInLimit &&
-                  this.docComparator(newDoc, lastDocInLimit) > 0) ||
-                (firstDocInLimit &&
-                  this.docComparator(newDoc, firstDocInLimit) < 0)
-              ) {
-                // This doc moved from inside the limit to outside the limit.
-                // That means there may be some other doc in the local cache
-                // that should be included instead.
-                needsRefill = true;
-              }
-            }
-          } else if (oldDocHadPendingMutations !== newDocHasPendingMutations) {
-            changeSet.track({ type: ChangeType.Metadata, doc: newDoc });
+      // Calculate change
+      if (oldDoc && newDoc) {
+        const docsEqual = oldDoc.data.isEqual(newDoc.data);
+        if (!docsEqual) {
+          if (!this.shouldWaitForSyncedDocument(oldDoc, newDoc)) {
+            changeSet.track({
+              type: ChangeType.Modified,
+              doc: newDoc
+            });
             changeApplied = true;
-          }
-        } else if (!oldDoc && newDoc) {
-          changeSet.track({ type: ChangeType.Added, doc: newDoc });
-          changeApplied = true;
-        } else if (oldDoc && !newDoc) {
-          changeSet.track({ type: ChangeType.Removed, doc: oldDoc });
-          changeApplied = true;
 
-          if (lastDocInLimit || firstDocInLimit) {
-            // A doc was removed from a full limit query. We'll need to
-            // requery from the local cache to see if we know about some other
-            // doc that should be in the results.
-            needsRefill = true;
-          }
-        }
-
-        if (changeApplied) {
-          if (newDoc) {
-            newDocumentSet = newDocumentSet.add(newDoc);
-            if (newDocHasPendingMutations) {
-              newMutatedKeys = newMutatedKeys.add(key);
-            } else {
-              newMutatedKeys = newMutatedKeys.delete(key);
+            if (
+              (lastDocInLimit &&
+                this.docComparator(newDoc, lastDocInLimit) > 0) ||
+              (firstDocInLimit &&
+                this.docComparator(newDoc, firstDocInLimit) < 0)
+            ) {
+              // This doc moved from inside the limit to outside the limit.
+              // That means there may be some other doc in the local cache
+              // that should be included instead.
+              needsRefill = true;
             }
-          } else {
-            newDocumentSet = newDocumentSet.delete(key);
-            newMutatedKeys = newMutatedKeys.delete(key);
           }
+        } else if (oldDocHadPendingMutations !== newDocHasPendingMutations) {
+          changeSet.track({ type: ChangeType.Metadata, doc: newDoc });
+          changeApplied = true;
+        }
+      } else if (!oldDoc && newDoc) {
+        changeSet.track({ type: ChangeType.Added, doc: newDoc });
+        changeApplied = true;
+      } else if (oldDoc && !newDoc) {
+        changeSet.track({ type: ChangeType.Removed, doc: oldDoc });
+        changeApplied = true;
+
+        if (lastDocInLimit || firstDocInLimit) {
+          // A doc was removed from a full limit query. We'll need to
+          // requery from the local cache to see if we know about some other
+          // doc that should be in the results.
+          needsRefill = true;
         }
       }
-    );
+
+      if (changeApplied) {
+        if (newDoc) {
+          newDocumentSet = newDocumentSet.add(newDoc);
+          if (newDocHasPendingMutations) {
+            newMutatedKeys = newMutatedKeys.add(key);
+          } else {
+            newMutatedKeys = newMutatedKeys.delete(key);
+          }
+        } else {
+          newDocumentSet = newDocumentSet.delete(key);
+          newMutatedKeys = newMutatedKeys.delete(key);
+        }
+      }
+    });
 
     // Drop documents out to meet limit/limitToLast requirement.
-    if (this.query.hasLimitToFirst() || this.query.hasLimitToLast()) {
+    if (hasLimitToFirst(this.query) || hasLimitToLast(this.query)) {
       while (newDocumentSet.size > this.query.limit!) {
-        const oldDoc = this.query.hasLimitToFirst()
+        const oldDoc = hasLimitToFirst(this.query)
           ? newDocumentSet.last()
           : newDocumentSet.first();
         newDocumentSet = newDocumentSet.delete(oldDoc!.key);
@@ -278,12 +272,12 @@ export class View {
   /**
    * Updates the view with the given ViewDocumentChanges and optionally updates
    * limbo docs and sync state from the provided target change.
-   * @param docChanges The set of changes to make to the view's docs.
-   * @param updateLimboDocuments Whether to update limbo documents based on this
-   *        change.
-   * @param targetChange A target change to apply for computing limbo docs and
+   * @param docChanges - The set of changes to make to the view's docs.
+   * @param updateLimboDocuments - Whether to update limbo documents based on
+   *        this change.
+   * @param targetChange - A target change to apply for computing limbo docs and
    *        sync state.
-   * @return A new ViewChange with the given docs, changes, and sync state.
+   * @returns A new ViewChange with the given docs, changes, and sync state.
    */
   // PORTING NOTE: The iOS/Android clients always compute limbo document changes.
   applyChanges(
@@ -456,7 +450,7 @@ export class View {
    * @param queryResult.remoteKeys - The keys of the documents that match the
    * query according to the backend.
    *
-   * @return The ViewChange that resulted from this synchronization.
+   * @returns The ViewChange that resulted from this synchronization.
    */
   // PORTING NOTE: Multi-tab only.
   synchronizeWithPersistedState(queryResult: QueryResult): ViewChange {

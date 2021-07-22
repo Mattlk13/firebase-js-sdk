@@ -16,22 +16,24 @@
  */
 
 import { expect } from 'chai';
+
 import { SnapshotVersion } from '../../../src/core/snapshot_version';
 import { IndexedDbPersistence } from '../../../src/local/indexeddb_persistence';
-import { MaybeDocument } from '../../../src/model/document';
+import { remoteDocumentCacheGetLastReadTime } from '../../../src/local/indexeddb_remote_document_cache';
+import { documentKeySet, DocumentMap } from '../../../src/model/collections';
+import { MutableDocument, Document } from '../../../src/model/document';
 import {
   deletedDoc,
   doc,
   expectEqual,
+  field,
   key,
   query,
   removedDoc,
-  version
+  version,
+  wrap
 } from '../../util/helpers';
-import {
-  documentKeySet,
-  MaybeDocumentMap
-} from '../../../src/model/collections';
+
 import * as persistenceHelpers from './persistence_test_helpers';
 import { TestRemoteDocumentCache } from './test_remote_document_cache';
 
@@ -91,8 +93,7 @@ describe('IndexedDbRemoteDocumentCache', () => {
 
   function getLastReadTime(): Promise<SnapshotVersion> {
     return persistence.runTransaction('getLastReadTime', 'readonly', txn => {
-      const remoteDocuments = persistence.getRemoteDocumentCache();
-      return remoteDocuments.getLastReadTime(txn);
+      return remoteDocumentCacheGetLastReadTime(txn);
     });
   }
 
@@ -255,7 +256,7 @@ function genericRemoteDocumentCacheTests(
 ): void {
   let cache: TestRemoteDocumentCache;
 
-  function setAndReadDocument(doc: MaybeDocument): Promise<void> {
+  function setAndReadDocument(doc: MutableDocument): Promise<void> {
     return cache
       .addEntry(doc)
       .then(() => {
@@ -270,9 +271,9 @@ function genericRemoteDocumentCacheTests(
     cache = await cachePromise();
   });
 
-  it('returns null for document not in cache', () => {
+  it('returns an invalid document for documents not in cache', () => {
     return cache.getEntry(key(DOC_PATH)).then(doc => {
-      expect(doc).to.equal(null);
+      expect(doc.isValidDocument()).to.be.false;
     });
   });
 
@@ -330,7 +331,7 @@ function genericRemoteDocumentCacheTests(
       .then(read => {
         expectEqual(read.get(key1), docs[0]);
         expectEqual(read.get(key2), docs[1]);
-        expect(read.get(missingKey)).to.be.null;
+        expect(read.get(missingKey)?.isValidDocument()).to.be.false;
       });
   });
 
@@ -344,7 +345,7 @@ function genericRemoteDocumentCacheTests(
         return cache.getEntry(key(DOC_PATH));
       })
       .then(read => {
-        expect(read).to.equal(null);
+        expect(read.isValidDocument()).to.be.false;
       });
   });
 
@@ -418,12 +419,47 @@ function genericRemoteDocumentCacheTests(
     );
     assertMatches([doc('b/old', 1, DOC_DATA)], matchingDocs);
   });
+
+  it('does not apply document modifications to cache', async () => {
+    // This test verifies that the MemoryMutationCache returns copies of all
+    // data to ensure that the documents in the cache cannot be modified.
+    function verifyOldValue(d: Document): void {
+      expect(d.data.field(field('state'))).to.deep.equal(wrap('old'));
+    }
+
+    let document = doc('coll/doc', 1, { state: 'old' });
+    await cache.addEntries([document], /* readTime= */ version(1));
+    verifyOldValue(document);
+    document.data.set(field('state'), wrap('new'));
+
+    document = await cache.getEntry(key('coll/doc'));
+    verifyOldValue(document);
+    document.data.set(field('state'), wrap('new'));
+
+    document = await cache
+      .getEntries(documentKeySet(key('coll/doc')))
+      .then(m => m.get(key('coll/doc'))!);
+    verifyOldValue(document);
+    document.data.set(field('state'), wrap('new'));
+
+    document = await cache
+      .getEntries(documentKeySet(key('coll/doc')))
+      .then(m => m.get(key('coll/doc'))!);
+    verifyOldValue(document);
+    document.data.set(field('state'), wrap('new'));
+
+    const query1 = query('coll');
+    document = await cache
+      .getDocumentsMatchingQuery(query1, SnapshotVersion.min())
+      .then(m => m.get(key('coll/doc'))!);
+    verifyOldValue(document);
+
+    document = await cache.getEntry(key('coll/doc'));
+    verifyOldValue(document);
+  });
 }
 
-function assertMatches(
-  expected: MaybeDocument[],
-  actual: MaybeDocumentMap
-): void {
+function assertMatches(expected: MutableDocument[], actual: DocumentMap): void {
   expect(actual.size).to.equal(expected.length);
   actual.forEach((actualKey, actualDoc) => {
     const found = expected.find(expectedDoc => {

@@ -16,16 +16,16 @@
  */
 
 import { expect } from 'chai';
-import {
-  changesFromSnapshot,
-  DocumentSnapshot,
-  QueryDocumentSnapshot
-} from '../../../src/api/database';
-import { Query } from '../../../src/core/query';
+
+import { Query as InternalQuery } from '../../../src/core/query';
 import { View } from '../../../src/core/view';
+import { Query } from '../../../src/exp/reference';
+import { ExpUserDataWriter } from '../../../src/exp/reference_impl';
+import { QuerySnapshot } from '../../../src/exp/snapshot';
 import { documentKeySet } from '../../../src/model/collections';
-import { Document } from '../../../src/model/document';
+import { MutableDocument } from '../../../src/model/document';
 import { DocumentKey } from '../../../src/model/document_key';
+import { firestore } from '../../util/api_helpers';
 import {
   applyDocChanges,
   doc,
@@ -34,13 +34,12 @@ import {
   orderBy,
   query
 } from '../../util/helpers';
-import { firestore } from '../../util/api_helpers';
 
 describe('DocumentChange:', () => {
   function expectPositions(
-    query: Query,
-    initialDocs: Document[],
-    updates: Array<Document | DocumentKey>
+    query: InternalQuery,
+    initialDocs: MutableDocument[],
+    updates: Array<MutableDocument | DocumentKey>
   ): void {
     const view = new View(query, documentKeySet());
     const initialSnapshot = applyDocChanges(view, ...initialDocs).snapshot!;
@@ -54,30 +53,20 @@ describe('DocumentChange:', () => {
     const expected = documentSetAsArray(updatedSnapshot.docs);
     const actual = documentSetAsArray(initialSnapshot.docs);
 
-    const changes = changesFromSnapshot(
-      updatedSnapshot,
-      true,
-      (doc, fromCache, hasPendingWrite) =>
-        new QueryDocumentSnapshot(
-          firestore(),
-          doc.key,
-          doc,
-          fromCache,
-          hasPendingWrite,
-          /* converter= */ null
-        )
+    const db = firestore()._delegate;
+    const snapshot = new QuerySnapshot(
+      db,
+      new ExpUserDataWriter(db),
+      new Query(db, /* converter= */ null, query),
+      updatedSnapshot
     );
 
-    for (const change of changes) {
+    for (const change of snapshot.docChanges()) {
       if (change.type !== 'added') {
         actual.splice(change.oldIndex, 1);
       }
       if (change.type !== 'removed') {
-        actual.splice(
-          change.newIndex,
-          0,
-          (change.doc as DocumentSnapshot)._document!
-        );
+        actual.splice(change.newIndex, 0, change.doc._document!);
       }
     }
 
@@ -144,8 +133,8 @@ describe('DocumentChange:', () => {
   it('positions are correct for randomly chosen examples', () => {
     const query1 = query('c', orderBy('sort'));
     for (let run = 0; run < 100; run++) {
-      const initialDocs: Document[] = [];
-      const updates: Array<DocumentKey | Document> = [];
+      const initialDocs: MutableDocument[] = [];
+      const updates: Array<DocumentKey | MutableDocument> = [];
       const numDocs = 100;
       for (let i = 0; i < numDocs; i++) {
         // Skip 20% of the docs

@@ -18,11 +18,13 @@
 import typescriptPlugin from 'rollup-plugin-typescript2';
 import typescript from 'typescript';
 import pkg from './package.json';
-import json from 'rollup-plugin-json';
+import json from '@rollup/plugin-json';
 
 const deps = Object.keys(
   Object.assign({}, pkg.peerDependencies, pkg.dependencies)
 );
+
+const nodeInternals = ['fs', 'path'];
 
 export default [
   {
@@ -49,5 +51,33 @@ export default [
       })
     ],
     external: id => deps.some(dep => id === dep || id.startsWith(`${dep}/`))
+  },
+  {
+    input: 'cli.ts',
+    output: [
+      {
+        file: 'dist/cli.js',
+        format: 'cjs',
+        sourcemap: false
+      }
+    ],
+    plugins: [
+      typescriptPlugin({
+        typescript,
+        tsconfigOverride: {
+          compilerOptions: {
+            target: 'es2017',
+            module: 'es2015'
+          }
+        }
+      }),
+      json({
+        preferConst: true
+      })
+    ],
+    external: id =>
+      [...deps, ...nodeInternals].some(
+        dep => id === dep || id.startsWith(`${dep}/`)
+      )
   }
 ];

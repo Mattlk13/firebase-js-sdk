@@ -16,14 +16,19 @@
  */
 
 import { expect } from 'chai';
+
 import { EmptyCredentialsProvider } from '../../../src/api/credentials';
 import { User } from '../../../src/auth/user';
 import { ComponentConfiguration } from '../../../src/core/component_provider';
 import { DatabaseInfo } from '../../../src/core/database_info';
 import {
   EventManager,
+  eventManagerListen,
+  eventManagerUnlisten,
   Observer,
-  QueryListener
+  QueryListener,
+  removeSnapshotsInSyncListener,
+  addSnapshotsInSyncListener
 } from '../../../src/core/event_manager';
 import {
   canonifyQuery,
@@ -38,17 +43,28 @@ import {
 } from '../../../src/core/query';
 import { SnapshotVersion } from '../../../src/core/snapshot_version';
 import { SyncEngine } from '../../../src/core/sync_engine';
+import {
+  syncEngineGetActiveLimboDocumentResolutions,
+  syncEngineGetEnqueuedLimboDocumentResolutions,
+  syncEngineRegisterPendingWritesCallback,
+  syncEngineListen,
+  syncEngineLoadBundle,
+  syncEngineUnlisten,
+  syncEngineWrite
+} from '../../../src/core/sync_engine_impl';
 import { TargetId } from '../../../src/core/types';
 import {
   ChangeType,
   DocumentViewChange
 } from '../../../src/core/view_snapshot';
+import { LoadBundleTask } from '../../../src/exp/bundle';
+import { IndexedDbPersistence } from '../../../src/local/indexeddb_persistence';
 import {
   DbPrimaryClient,
   DbPrimaryClientKey,
-  SCHEMA_VERSION,
-  SchemaConverter
+  SCHEMA_VERSION
 } from '../../../src/local/indexeddb_schema';
+import { SchemaConverter } from '../../../src/local/indexeddb_schema_converter';
 import { LocalStore } from '../../../src/local/local_store';
 import {
   ClientId,
@@ -56,13 +72,23 @@ import {
 } from '../../../src/local/shared_client_state';
 import { SimpleDb } from '../../../src/local/simple_db';
 import { TargetData, TargetPurpose } from '../../../src/local/target_data';
-import { DocumentOptions } from '../../../src/model/document';
 import { DocumentKey } from '../../../src/model/document_key';
-import { JsonObject } from '../../../src/model/object_value';
 import { Mutation } from '../../../src/model/mutation';
+import { JsonObject } from '../../../src/model/object_value';
+import { encodeBase64 } from '../../../src/platform/base64';
+import { toByteStreamReader } from '../../../src/platform/byte_stream_reader';
+import { newTextEncoder } from '../../../src/platform/serializer';
 import * as api from '../../../src/protos/firestore_proto_api';
 import { ExistenceFilter } from '../../../src/remote/existence_filter';
-import { RemoteStore } from '../../../src/remote/remote_store';
+import {
+  RemoteStore,
+  fillWritePipeline,
+  remoteStoreDisableNetwork,
+  remoteStoreShutdown,
+  remoteStoreEnableNetwork,
+  remoteStoreHandleCredentialChange,
+  outstandingWrites
+} from '../../../src/remote/remote_store';
 import { mapCodeFromRpcCode } from '../../../src/remote/rpc_error';
 import {
   JsonProtoSerializer,
@@ -78,8 +104,15 @@ import {
   WatchTargetChangeState
 } from '../../../src/remote/watch_change';
 import { debugAssert, fail } from '../../../src/util/assert';
-import { AsyncQueue, TimerId } from '../../../src/util/async_queue';
+import { TimerId } from '../../../src/util/async_queue';
+import {
+  AsyncQueueImpl,
+  newAsyncQueue
+} from '../../../src/util/async_queue_impl';
+import { newBundleReader } from '../../../src/util/bundle_reader_impl';
+import { ByteString } from '../../../src/util/byte_string';
 import { FirestoreError } from '../../../src/util/error';
+import { logWarn } from '../../../src/util/log';
 import { primitiveComparator } from '../../../src/util/misc';
 import { forEach, objectSize } from '../../../src/util/obj';
 import { ObjectMap } from '../../../src/util/obj_map';
@@ -102,38 +135,39 @@ import {
 } from '../../util/helpers';
 import { encodeWatchChange } from '../../util/spec_test_helpers';
 import {
-  clearTestPersistence,
-  INDEXEDDB_TEST_DATABASE_NAME,
-  TEST_DATABASE_ID,
-  TEST_PERSISTENCE_KEY,
-  TEST_SERIALIZER
-} from '../local/persistence_test_helpers';
-import { MULTI_CLIENT_TAG } from './describe_spec';
-import { ByteString } from '../../../src/util/byte_string';
-import { SortedSet } from '../../../src/util/sorted_set';
-import { ActiveTargetMap, ActiveTargetSpec } from './spec_builder';
-import { LruParams } from '../../../src/local/lru_garbage_collector';
-import { PersistenceSettings } from '../../../src/core/firestore_client';
-import {
-  EventAggregator,
-  MockConnection,
-  MockIndexedDbPersistence,
-  MockMemoryPersistence,
-  QueryEvent,
-  SharedWriteTracker,
-  MockMultiTabOfflineComponentProvider,
-  MockMemoryOfflineComponentProvider,
-  MockOnlineComponentProvider
-} from './spec_test_components';
-import { IndexedDbPersistence } from '../../../src/local/indexeddb_persistence';
-import { encodeBase64 } from '../../../src/platform/base64';
-import {
   FakeDocument,
   SharedFakeWebStorage,
   testWindow
 } from '../../util/test_platform';
+import {
+  clearTestPersistence,
+  INDEXEDDB_TEST_DATABASE_NAME,
+  TEST_APP_ID,
+  TEST_DATABASE_ID,
+  TEST_PERSISTENCE_KEY,
+  TEST_SERIALIZER
+} from '../local/persistence_test_helpers';
+
+import { MULTI_CLIENT_TAG } from './describe_spec';
+import { ActiveTargetMap, ActiveTargetSpec } from './spec_builder';
+import {
+  EventAggregator,
+  MockConnection,
+  MockIndexedDbPersistence,
+  MockMemoryOfflineComponentProvider,
+  MockMemoryPersistence,
+  MockMultiTabOfflineComponentProvider,
+  MockOnlineComponentProvider,
+  QueryEvent,
+  SharedWriteTracker
+} from './spec_test_components';
 
 const ARBITRARY_SEQUENCE_NUMBER = 2;
+
+interface DocumentOptions {
+  hasLocalMutations?: boolean;
+  hasCommittedMutations?: boolean;
+}
 
 export function parseQuery(querySpec: string | SpecQuery): Query {
   if (typeof querySpec === 'string') {
@@ -166,7 +200,7 @@ export function parseQuery(querySpec: string | SpecQuery): Query {
 }
 
 abstract class TestRunner {
-  protected queue: AsyncQueue;
+  protected queue: AsyncQueueImpl;
 
   // Initialized asynchronously via start().
   private connection!: MockConnection;
@@ -176,6 +210,7 @@ abstract class TestRunner {
   private eventList: QueryEvent[] = [];
   private acknowledgedDocs: string[];
   private rejectedDocs: string[];
+  private waitForPendingWritesEvents = 0;
   private snapshotsInSyncListeners: Array<Observer<void>>;
   private snapshotsInSyncEvents = 0;
 
@@ -210,23 +245,25 @@ abstract class TestRunner {
 
   constructor(
     private sharedWrites: SharedWriteTracker,
-    private persistenceSettings: PersistenceSettings,
     clientIndex: number,
     config: SpecConfig
   ) {
     this.clientId = `client${clientIndex}`;
     this.databaseInfo = new DatabaseInfo(
       TEST_DATABASE_ID,
+      TEST_APP_ID,
       TEST_PERSISTENCE_KEY,
       'host',
       /*ssl=*/ false,
-      /*forceLongPolling=*/ false
+      /*forceLongPolling=*/ false,
+      /*autoDetectLongPolling=*/ false,
+      /*useFetchStreams=*/ false
     );
 
     // TODO(mrschmidt): During client startup in `firestore_client`, we block
     // the AsyncQueue from executing any operation. We should mimic this in the
     // setup of the spec tests.
-    this.queue = new AsyncQueue();
+    this.queue = newAsyncQueue() as AsyncQueueImpl;
     this.queue.skipDelaysForTimerId(TimerId.ListenStreamConnectionBackoff);
 
     this.serializer = new JsonProtoSerializer(
@@ -253,8 +290,7 @@ abstract class TestRunner {
       clientId: this.clientId,
       initialUser: this.user,
       maxConcurrentLimboResolutions:
-        this.maxConcurrentLimboResolutions ?? Number.MAX_SAFE_INTEGER,
-      persistenceSettings: this.persistenceSettings
+        this.maxConcurrentLimboResolutions ?? Number.MAX_SAFE_INTEGER
     };
 
     this.connection = new MockConnection(this.queue);
@@ -262,11 +298,12 @@ abstract class TestRunner {
     const onlineComponentProvider = new MockOnlineComponentProvider(
       this.connection
     );
-    const offlineComponentProvider = await this.initializeOfflineComponentProvider(
-      onlineComponentProvider,
-      configuration,
-      this.useGarbageCollection
-    );
+    const offlineComponentProvider =
+      await this.initializeOfflineComponentProvider(
+        onlineComponentProvider,
+        configuration,
+        this.useGarbageCollection
+      );
     await onlineComponentProvider.initialize(
       offlineComponentProvider,
       configuration
@@ -278,6 +315,12 @@ abstract class TestRunner {
     this.remoteStore = onlineComponentProvider.remoteStore;
     this.syncEngine = onlineComponentProvider.syncEngine;
     this.eventManager = onlineComponentProvider.eventManager;
+
+    this.eventManager.onListen = syncEngineListen.bind(null, this.syncEngine);
+    this.eventManager.onUnlisten = syncEngineUnlisten.bind(
+      null,
+      this.syncEngine
+    );
 
     await this.persistence.setDatabaseDeletedListener(async () => {
       await this.shutdown();
@@ -317,6 +360,9 @@ abstract class TestRunner {
     this.validateExpectedSnapshotEvents(step.expectedSnapshotEvents!);
     await this.validateExpectedState(step.expectedState!);
     this.validateSnapshotsInSyncEvents(step.expectedSnapshotsInSyncEvents);
+    this.validateWaitForPendingWritesEvents(
+      step.expectedWaitForPendingWritesEvents
+    );
     this.eventList = [];
     this.rejectedDocs = [];
     this.acknowledgedDocs = [];
@@ -337,6 +383,8 @@ abstract class TestRunner {
       return this.doAddSnapshotsInSyncListener();
     } else if ('removeSnapshotsInSyncListener' in step) {
       return this.doRemoveSnapshotsInSyncListener();
+    } else if ('loadBundle' in step) {
+      return this.doLoadBundle(step.loadBundle!);
     } else if ('watchAck' in step) {
       return this.doWatchAck(step.watchAck!);
     } else if ('watchCurrent' in step) {
@@ -357,6 +405,8 @@ abstract class TestRunner {
       return this.doWriteAck(step.writeAck!);
     } else if ('failWrite' in step) {
       return this.doFailWrite(step.failWrite!);
+    } else if ('waitForPendingWrites' in step) {
+      return this.doWaitForPendingWrites();
     } else if ('runTimer' in step) {
       return this.doRunTimer(step.runTimer!);
     } else if ('drainQueue' in step) {
@@ -388,8 +438,9 @@ abstract class TestRunner {
   private async doListen(listenSpec: SpecUserListen): Promise<void> {
     let targetFailed = false;
 
-    const querySpec = listenSpec[1];
+    const querySpec = listenSpec.query;
     const query = parseQuery(querySpec);
+
     const aggregator = new EventAggregator(query, e => {
       if (e.error) {
         targetFailed = true;
@@ -404,7 +455,9 @@ abstract class TestRunner {
     const queryListener = new QueryListener(query, aggregator, options);
     this.queryListeners.set(query, queryListener);
 
-    await this.queue.enqueue(() => this.eventManager.listen(queryListener));
+    await this.queue.enqueue(() =>
+      eventManagerListen(this.eventManager, queryListener)
+    );
 
     if (targetFailed) {
       expect(this.persistence.injectFailures).contains('Allocate target');
@@ -436,7 +489,9 @@ abstract class TestRunner {
     const eventEmitter = this.queryListeners.get(query);
     debugAssert(!!eventEmitter, 'There must be a query to unlisten too!');
     this.queryListeners.delete(query);
-    await this.queue.enqueue(() => this.eventManager.unlisten(eventEmitter!));
+    await this.queue.enqueue(() =>
+      eventManagerUnlisten(this.eventManager, eventEmitter!)
+    );
   }
 
   private doSet(setSpec: SpecUserSet): Promise<void> {
@@ -460,18 +515,32 @@ abstract class TestRunner {
       error: () => {}
     };
     this.snapshotsInSyncListeners.push(observer);
-    this.eventManager.addSnapshotsInSyncListener(observer);
+    addSnapshotsInSyncListener(this.eventManager, observer);
     return Promise.resolve();
   }
 
   private doRemoveSnapshotsInSyncListener(): Promise<void> {
     const removeObs = this.snapshotsInSyncListeners.pop();
     if (removeObs) {
-      this.eventManager.removeSnapshotsInSyncListener(removeObs);
+      removeSnapshotsInSyncListener(this.eventManager, removeObs);
     } else {
       throw new Error('There must be a listener to unlisten to');
     }
     return Promise.resolve();
+  }
+
+  private async doLoadBundle(bundle: string): Promise<void> {
+    const reader = newBundleReader(
+      toByteStreamReader(newTextEncoder().encode(bundle)),
+      this.serializer
+    );
+    const task = new LoadBundleTask();
+    return this.queue.enqueue(async () => {
+      syncEngineLoadBundle(this.syncEngine, reader, task);
+      await task.catch(e => {
+        logWarn(`Loading bundle failed with ${e}`);
+      });
+    });
   }
 
   private doMutations(mutations: Mutation[]): Promise<void> {
@@ -488,9 +557,9 @@ abstract class TestRunner {
       this.sharedWrites.push(mutations);
     }
 
-    return this.queue.enqueue(() => {
-      return this.syncEngine.write(mutations, syncEngineCallback);
-    });
+    return this.queue.enqueue(() =>
+      syncEngineWrite(this.syncEngine, mutations, syncEngineCallback)
+    );
   }
 
   private doWatchAck(ackedTargets: SpecWatchAck): Promise<void> {
@@ -567,10 +636,14 @@ abstract class TestRunner {
         ? doc(
             watchEntity.doc.key,
             watchEntity.doc.version,
-            watchEntity.doc.value,
-            watchEntity.doc.options
+            watchEntity.doc.value
           )
         : deletedDoc(watchEntity.doc.key, watchEntity.doc.version);
+      if (watchEntity.doc.options?.hasCommittedMutations) {
+        document.setHasCommittedMutations();
+      } else if (watchEntity.doc.options?.hasLocalMutations) {
+        document.setHasLocalMutations();
+      }
       const change = new DocumentWatchChange(
         watchEntity.targets || [],
         watchEntity.removedTargets || [],
@@ -687,6 +760,14 @@ abstract class TestRunner {
     });
   }
 
+  private async doWaitForPendingWrites(): Promise<void> {
+    const deferred = new Deferred();
+    void deferred.promise.then(() => ++this.waitForPendingWritesEvents);
+    return this.queue.enqueue(() =>
+      syncEngineRegisterPendingWritesCallback(this.syncEngine, deferred)
+    );
+  }
+
   private async doRunTimer(timer: string): Promise<void> {
     // We assume the timer string is a valid TimerID enum value, but if it's
     // not, then there won't be a matching item on the queue and
@@ -699,9 +780,9 @@ abstract class TestRunner {
     this.networkEnabled = false;
     // Make sure to execute all writes that are currently queued. This allows us
     // to assert on the total number of requests sent before shutdown.
-    await this.remoteStore.fillWritePipeline();
+    await fillWritePipeline(this.remoteStore);
     this.persistence.setNetworkEnabled(false);
-    await this.remoteStore.disableNetwork();
+    await remoteStoreDisableNetwork(this.remoteStore);
   }
 
   private async doDrainQueue(): Promise<void> {
@@ -711,11 +792,11 @@ abstract class TestRunner {
   private async doEnableNetwork(): Promise<void> {
     this.networkEnabled = true;
     this.persistence.setNetworkEnabled(true);
-    await this.remoteStore.enableNetwork();
+    await remoteStoreEnableNetwork(this.remoteStore);
   }
 
   private async doShutdown(): Promise<void> {
-    await this.remoteStore.shutdown();
+    await remoteStoreShutdown(this.remoteStore);
     await this.sharedClientState.shutdown();
     // We don't delete the persisted data here since multi-clients may still
     // be accessing it. Instead, we manually remove it at the end of the
@@ -758,7 +839,7 @@ abstract class TestRunner {
     // during an IndexedDb failure. Non-recovery tests will pick up the user
     // change when the AsyncQueue is drained.
     this.queue.enqueueRetryable(() =>
-      this.remoteStore.handleCredentialChange(new User(user))
+      remoteStoreHandleCredentialChange(this.remoteStore, new User(user))
     );
   }
 
@@ -807,7 +888,7 @@ abstract class TestRunner {
   ): Promise<void> {
     if (expectedState) {
       if ('numOutstandingWrites' in expectedState) {
-        expect(this.remoteStore.outstandingWrites()).to.equal(
+        expect(outstandingWrites(this.remoteStore)).to.equal(
           expectedState.numOutstandingWrites
         );
       }
@@ -833,9 +914,8 @@ abstract class TestRunner {
         this.expectedActiveLimboDocs = expectedState.activeLimboDocs!.map(key);
       }
       if ('enqueuedLimboDocs' in expectedState) {
-        this.expectedEnqueuedLimboDocs = expectedState.enqueuedLimboDocs!.map(
-          key
-        );
+        this.expectedEnqueuedLimboDocs =
+          expectedState.enqueuedLimboDocs!.map(key);
       }
       if ('activeTargets' in expectedState) {
         this.expectedActiveTargets.clear();
@@ -883,15 +963,30 @@ abstract class TestRunner {
     }
   }
 
+  private validateWaitForPendingWritesEvents(
+    expectedCount: number | undefined
+  ): void {
+    expect(this.waitForPendingWritesEvents).to.eq(
+      expectedCount || 0,
+      'for waitForPendingWritesEvents'
+    );
+    this.waitForPendingWritesEvents = 0;
+  }
+
   private validateSnapshotsInSyncEvents(
     expectedCount: number | undefined
   ): void {
-    expect(this.snapshotsInSyncEvents).to.eq(expectedCount || 0);
+    expect(this.snapshotsInSyncEvents).to.eq(
+      expectedCount || 0,
+      'for snapshotsInSyncEvents'
+    );
     this.snapshotsInSyncEvents = 0;
   }
 
   private validateActiveLimboDocs(): void {
-    let actualLimboDocs = this.syncEngine.activeLimboDocumentResolutions();
+    let actualLimboDocs = syncEngineGetActiveLimboDocumentResolutions(
+      this.syncEngine
+    );
 
     if (this.connection.isWatchOpen) {
       // Validate that each active limbo doc has an expected active target
@@ -923,29 +1018,16 @@ abstract class TestRunner {
   }
 
   private validateEnqueuedLimboDocs(): void {
-    let actualLimboDocs = new SortedSet<DocumentKey>(DocumentKey.comparator);
-    this.syncEngine.enqueuedLimboDocumentResolutions().forEach(key => {
-      actualLimboDocs = actualLimboDocs.add(key);
-    });
-    let expectedLimboDocs = new SortedSet<DocumentKey>(DocumentKey.comparator);
-    this.expectedEnqueuedLimboDocs.forEach(key => {
-      expectedLimboDocs = expectedLimboDocs.add(key);
-    });
-    actualLimboDocs.forEach(key => {
-      expect(expectedLimboDocs.has(key)).to.equal(
-        true,
-        `Found enqueued limbo doc ${key.toString()}, but it was not in ` +
-          `the set of expected enqueued limbo documents ` +
-          `(${expectedLimboDocs.toString()})`
-      );
-    });
-    expectedLimboDocs.forEach(key => {
-      expect(actualLimboDocs.has(key)).to.equal(
-        true,
-        `Expected doc ${key.toString()} to be enqueued for limbo resolution, ` +
-          `but it was not in the queue (${actualLimboDocs.toString()})`
-      );
-    });
+    const actualLimboDocs = Array.from(
+      syncEngineGetEnqueuedLimboDocumentResolutions(this.syncEngine)
+    );
+    const expectedLimboDocs = Array.from(this.expectedEnqueuedLimboDocs, key =>
+      key.path.canonicalString()
+    );
+    expect(actualLimboDocs).to.have.members(
+      expectedLimboDocs,
+      'The set of enqueued limbo documents is incorrect'
+    );
   }
 
   private async validateActiveTargets(): Promise<void> {
@@ -976,18 +1058,24 @@ abstract class TestRunner {
       // TODO(mcg): populate the purpose of the target once it's possible to
       // encode that in the spec tests. For now, hard-code that it's a listen
       // despite the fact that it's not always the right value.
-      const expectedTarget = toTarget(
-        this.serializer,
-        new TargetData(
-          queryToTarget(parseQuery(expected.queries[0])),
-          targetId,
-          TargetPurpose.Listen,
-          ARBITRARY_SEQUENCE_NUMBER,
-          SnapshotVersion.min(),
-          SnapshotVersion.min(),
-          byteStringFromString(expected.resumeToken)
-        )
+      let targetData = new TargetData(
+        queryToTarget(parseQuery(expected.queries[0])),
+        targetId,
+        TargetPurpose.Listen,
+        ARBITRARY_SEQUENCE_NUMBER
       );
+      if (expected.resumeToken && expected.resumeToken !== '') {
+        targetData = targetData.withResumeToken(
+          byteStringFromString(expected.resumeToken),
+          SnapshotVersion.min()
+        );
+      } else {
+        targetData = targetData.withResumeToken(
+          ByteString.EMPTY_BYTE_STRING,
+          version(expected.readTime!)
+        );
+      }
+      const expectedTarget = toTarget(this.serializer, targetData);
       expect(actualTarget.query).to.deep.equal(expectedTarget.query);
       expect(actualTarget.targetId).to.equal(expectedTarget.targetId);
       expect(actualTarget.readTime).to.equal(expectedTarget.readTime);
@@ -1063,34 +1151,20 @@ abstract class TestRunner {
     type: ChangeType,
     change: SpecDocument
   ): DocumentViewChange {
+    const document = doc(change.key, change.version, change.value || {});
+    if (change.options?.hasCommittedMutations) {
+      document.setHasCommittedMutations();
+    } else if (change.options?.hasLocalMutations) {
+      document.setHasLocalMutations();
+    }
     return {
       type,
-      doc: doc(
-        change.key,
-        change.version,
-        change.value || {},
-        change.options || {}
-      )
+      doc: document
     };
   }
 }
 
 class MemoryTestRunner extends TestRunner {
-  constructor(
-    sharedWrites: SharedWriteTracker,
-    clientIndex: number,
-    config: SpecConfig
-  ) {
-    super(
-      sharedWrites,
-      {
-        durable: false
-      },
-      clientIndex,
-      config
-    );
-  }
-
   protected async initializeOfflineComponentProvider(
     onlineComponentProvider: MockOnlineComponentProvider,
     configuration: ComponentConfiguration,
@@ -1113,17 +1187,7 @@ class IndexedDbTestRunner extends TestRunner {
     clientIndex: number,
     config: SpecConfig
   ) {
-    super(
-      sharedWrites,
-      {
-        durable: true,
-        cacheSizeBytes: LruParams.DEFAULT_CACHE_SIZE_BYTES,
-        synchronizeTabs: true,
-        forceOwningTab: false
-      },
-      clientIndex,
-      config
-    );
+    super(sharedWrites, clientIndex, config);
   }
 
   protected async initializeOfflineComponentProvider(
@@ -1283,6 +1347,8 @@ export interface SpecStep {
   addSnapshotsInSyncListener?: true;
   /** Unlistens from a SnapshotsInSync event. */
   removeSnapshotsInSyncListener?: true;
+  /** Loads a bundle from a string. */
+  loadBundle?: string;
 
   /** Ack for a query in the watch stream */
   watchAck?: SpecWatchAck;
@@ -1305,6 +1371,8 @@ export interface SpecStep {
   writeAck?: SpecWriteAck;
   /** Fail a write */
   failWrite?: SpecWriteFailure;
+  /** Add a new `waitForPendingWrites` listener. */
+  waitForPendingWrites?: true;
 
   /** Fails the listed database actions. */
   failDatabase?: false | PersistenceAction[];
@@ -1358,10 +1426,18 @@ export interface SpecStep {
    * If not provided, the test will fail if the step causes events to be raised.
    */
   expectedSnapshotsInSyncEvents?: number;
+
+  /**
+   * Optional expected number of waitForPendingWrite callbacks to be called.
+   * If not provided, the test will fail if the step causes events to be raised.
+   */
+  expectedWaitForPendingWritesEvents?: number;
 }
 
-/** [<target-id>, <query-path>] */
-export type SpecUserListen = [TargetId, string | SpecQuery];
+export interface SpecUserListen {
+  targetId: TargetId;
+  query: string | SpecQuery;
+}
 
 /** [<target-id>, <query-path>] */
 export type SpecUserUnlisten = [TargetId, string | SpecQuery];
@@ -1559,11 +1635,16 @@ async function clearCurrentPrimaryLease(): Promise<void> {
     SCHEMA_VERSION,
     new SchemaConverter(TEST_SERIALIZER)
   );
-  await db.runTransaction('readwrite', [DbPrimaryClient.store], txn => {
-    const primaryClientStore = txn.store<DbPrimaryClientKey, DbPrimaryClient>(
-      DbPrimaryClient.store
-    );
-    return primaryClientStore.delete(DbPrimaryClient.key);
-  });
+  await db.runTransaction(
+    'clearCurrentPrimaryLease',
+    'readwrite',
+    [DbPrimaryClient.store],
+    txn => {
+      const primaryClientStore = txn.store<DbPrimaryClientKey, DbPrimaryClient>(
+        DbPrimaryClient.store
+      );
+      return primaryClientStore.delete(DbPrimaryClient.key);
+    }
+  );
   db.close();
 }

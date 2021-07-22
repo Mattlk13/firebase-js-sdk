@@ -15,22 +15,27 @@
  * limitations under the License.
  */
 
-import { Timestamp } from '../api/timestamp';
+import { BundleMetadata, NamedQuery } from '../core/bundle';
+import { LimitType, Query, queryWithLimit } from '../core/query';
 import { SnapshotVersion } from '../core/snapshot_version';
-import {
-  Document,
-  MaybeDocument,
-  NoDocument,
-  UnknownDocument
-} from '../model/document';
+import { canonifyTarget, isDocumentTarget, Target } from '../core/target';
+import { Timestamp } from '../exp/timestamp';
+import { MutableDocument } from '../model/document';
 import { DocumentKey } from '../model/document_key';
 import { MutationBatch } from '../model/mutation_batch';
+import {
+  BundleMetadata as ProtoBundleMetadata,
+  NamedQuery as ProtoNamedQuery,
+  BundledQuery as ProtoBundledQuery
+} from '../protos/firestore_bundle_proto';
 import { DocumentsTarget as PublicDocumentsTarget } from '../protos/firestore_proto_api';
 import {
+  convertQueryTargetToQuery,
   fromDocument,
   fromDocumentsTarget,
   fromMutation,
   fromQueryTarget,
+  fromVersion,
   JsonProtoSerializer,
   toDocument,
   toDocumentsTarget,
@@ -39,9 +44,11 @@ import {
 } from '../remote/serializer';
 import { debugAssert, fail } from '../util/assert';
 import { ByteString } from '../util/byte_string';
-import { canonifyTarget, isDocumentTarget, Target } from '../core/target';
+
 import {
+  DbBundle,
   DbMutationBatch,
+  DbNamedQuery,
   DbNoDocument,
   DbQuery,
   DbRemoteDocument,
@@ -61,7 +68,7 @@ export class LocalSerializer {
 export function fromDbRemoteDocument(
   localSerializer: LocalSerializer,
   remoteDoc: DbRemoteDocument
-): MaybeDocument {
+): MutableDocument {
   if (remoteDoc.document) {
     return fromDocument(
       localSerializer.remoteSerializer,
@@ -71,13 +78,14 @@ export function fromDbRemoteDocument(
   } else if (remoteDoc.noDocument) {
     const key = DocumentKey.fromSegments(remoteDoc.noDocument.path);
     const version = fromDbTimestamp(remoteDoc.noDocument.readTime);
-    return new NoDocument(key, version, {
-      hasCommittedMutations: !!remoteDoc.hasCommittedMutations
-    });
+    const document = MutableDocument.newNoDocument(key, version);
+    return remoteDoc.hasCommittedMutations
+      ? document.setHasCommittedMutations()
+      : document;
   } else if (remoteDoc.unknownDocument) {
     const key = DocumentKey.fromSegments(remoteDoc.unknownDocument.path);
     const version = fromDbTimestamp(remoteDoc.unknownDocument.version);
-    return new UnknownDocument(key, version);
+    return MutableDocument.newUnknownDocument(key, version);
   } else {
     return fail('Unexpected DbRemoteDocument');
   }
@@ -86,14 +94,14 @@ export function fromDbRemoteDocument(
 /** Encodes a document for storage locally. */
 export function toDbRemoteDocument(
   localSerializer: LocalSerializer,
-  maybeDoc: MaybeDocument,
+  document: MutableDocument,
   readTime: SnapshotVersion
 ): DbRemoteDocument {
   const dbReadTime = toDbTimestampKey(readTime);
-  const parentPath = maybeDoc.key.path.popLast().toArray();
-  if (maybeDoc instanceof Document) {
-    const doc = toDocument(localSerializer.remoteSerializer, maybeDoc);
-    const hasCommittedMutations = maybeDoc.hasCommittedMutations;
+  const parentPath = document.key.path.popLast().toArray();
+  if (document.isFoundDocument()) {
+    const doc = toDocument(localSerializer.remoteSerializer, document);
+    const hasCommittedMutations = document.hasCommittedMutations;
     return new DbRemoteDocument(
       /* unknownDocument= */ null,
       /* noDocument= */ null,
@@ -102,10 +110,10 @@ export function toDbRemoteDocument(
       dbReadTime,
       parentPath
     );
-  } else if (maybeDoc instanceof NoDocument) {
-    const path = maybeDoc.key.path.toArray();
-    const readTime = toDbTimestamp(maybeDoc.version);
-    const hasCommittedMutations = maybeDoc.hasCommittedMutations;
+  } else if (document.isNoDocument()) {
+    const path = document.key.path.toArray();
+    const readTime = toDbTimestamp(document.version);
+    const hasCommittedMutations = document.hasCommittedMutations;
     return new DbRemoteDocument(
       /* unknownDocument= */ null,
       new DbNoDocument(path, readTime),
@@ -114,9 +122,9 @@ export function toDbRemoteDocument(
       dbReadTime,
       parentPath
     );
-  } else if (maybeDoc instanceof UnknownDocument) {
-    const path = maybeDoc.key.path.toArray();
-    const readTime = toDbTimestamp(maybeDoc.version);
+  } else if (document.isUnknownDocument()) {
+    const path = document.key.path.toArray();
+    const readTime = toDbTimestamp(document.version);
     return new DbRemoteDocument(
       new DbUnknownDocument(path, readTime),
       /* noDocument= */ null,
@@ -126,7 +134,7 @@ export function toDbRemoteDocument(
       parentPath
     );
   } else {
-    return fail('Unexpected MaybeDocument');
+    return fail('Unexpected Document ' + document);
   }
 }
 
@@ -183,6 +191,30 @@ export function fromDbMutationBatch(
   const baseMutations = (dbBatch.baseMutations || []).map(m =>
     fromMutation(localSerializer.remoteSerializer, m)
   );
+
+  // Squash old transform mutations into existing patch or set mutations.
+  // The replacement of representing `transforms` with `update_transforms`
+  // on the SDK means that old `transform` mutations stored in IndexedDB need
+  // to be updated to `update_transforms`.
+  // TODO(b/174608374): Remove this code once we perform a schema migration.
+  for (let i = 0; i < dbBatch.mutations.length - 1; ++i) {
+    const currentMutation = dbBatch.mutations[i];
+    const hasTransform =
+      i + 1 < dbBatch.mutations.length &&
+      dbBatch.mutations[i + 1].transform !== undefined;
+    if (hasTransform) {
+      debugAssert(
+        dbBatch.mutations[i].transform === undefined &&
+          dbBatch.mutations[i].update !== undefined,
+        'TransformMutation should be preceded by a patch or set mutation'
+      );
+      const transformMutation = dbBatch.mutations[i + 1];
+      currentMutation.updateTransforms = transformMutation.transform!.fieldTransforms;
+      dbBatch.mutations.splice(i + 1, 1);
+      ++i;
+    }
+  }
+
   const mutations = dbBatch.mutations.map(m =>
     fromMutation(localSerializer.remoteSerializer, m)
   );
@@ -270,4 +302,81 @@ export function toDbTarget(
  */
 function isDocumentQuery(dbQuery: DbQuery): dbQuery is PublicDocumentsTarget {
   return (dbQuery as PublicDocumentsTarget).documents !== undefined;
+}
+
+/** Encodes a DbBundle to a BundleMetadata object. */
+export function fromDbBundle(dbBundle: DbBundle): BundleMetadata {
+  return {
+    id: dbBundle.bundleId,
+    createTime: fromDbTimestamp(dbBundle.createTime),
+    version: dbBundle.version
+  };
+}
+
+/** Encodes a BundleMetadata to a DbBundle. */
+export function toDbBundle(metadata: ProtoBundleMetadata): DbBundle {
+  return {
+    bundleId: metadata.id!,
+    createTime: toDbTimestamp(fromVersion(metadata.createTime!)),
+    version: metadata.version!
+  };
+}
+
+/** Encodes a DbNamedQuery to a NamedQuery. */
+export function fromDbNamedQuery(dbNamedQuery: DbNamedQuery): NamedQuery {
+  return {
+    name: dbNamedQuery.name,
+    query: fromBundledQuery(dbNamedQuery.bundledQuery),
+    readTime: fromDbTimestamp(dbNamedQuery.readTime)
+  };
+}
+
+/** Encodes a NamedQuery from a bundle proto to a DbNamedQuery. */
+export function toDbNamedQuery(query: ProtoNamedQuery): DbNamedQuery {
+  return {
+    name: query.name!,
+    readTime: toDbTimestamp(fromVersion(query.readTime!)),
+    bundledQuery: query.bundledQuery!
+  };
+}
+
+/**
+ * Encodes a `BundledQuery` from bundle proto to a Query object.
+ *
+ * This reconstructs the original query used to build the bundle being loaded,
+ * including features exists only in SDKs (for example: limit-to-last).
+ */
+export function fromBundledQuery(bundledQuery: ProtoBundledQuery): Query {
+  const query = convertQueryTargetToQuery({
+    parent: bundledQuery.parent!,
+    structuredQuery: bundledQuery.structuredQuery!
+  });
+  if (bundledQuery.limitType === 'LAST') {
+    debugAssert(
+      !!query.limit,
+      'Bundled query has limitType LAST, but limit is null'
+    );
+    return queryWithLimit(query, query.limit, LimitType.Last);
+  }
+  return query;
+}
+
+/** Encodes a NamedQuery proto object to a NamedQuery model object. */
+export function fromProtoNamedQuery(namedQuery: ProtoNamedQuery): NamedQuery {
+  return {
+    name: namedQuery.name!,
+    query: fromBundledQuery(namedQuery.bundledQuery!),
+    readTime: fromVersion(namedQuery.readTime!)
+  };
+}
+
+/** Decodes a BundleMetadata proto into a BundleMetadata object. */
+export function fromBundleMetadata(
+  metadata: ProtoBundleMetadata
+): BundleMetadata {
+  return {
+    id: metadata.id!,
+    version: metadata.version!,
+    createTime: fromVersion(metadata.createTime!)
+  };
 }

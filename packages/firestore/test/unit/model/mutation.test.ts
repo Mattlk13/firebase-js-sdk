@@ -16,10 +16,10 @@
  */
 
 import { expect } from 'chai';
+
 import { FieldValue } from '../../../src/api/field_value';
 import { Timestamp } from '../../../src/api/timestamp';
-import { Document, MaybeDocument } from '../../../src/model/document';
-import { serverTimestamp } from '../../../src/model/server_timestamps';
+import { MutableDocument } from '../../../src/model/document';
 import {
   applyMutationToLocalView,
   applyMutationToRemoteDocument,
@@ -28,6 +28,7 @@ import {
   MutationResult,
   Precondition
 } from '../../../src/model/mutation';
+import { serverTimestamp } from '../../../src/model/server_timestamps';
 import {
   ArrayRemoveTransformOperation,
   ArrayUnionTransformOperation
@@ -39,17 +40,16 @@ import {
   deleteMutation,
   doc,
   field,
+  invalidDoc,
   key,
   mutationResult,
   patchMutation,
   setMutation,
-  transformMutation,
   unknownDoc,
   version,
   wrap,
   wrapObject
 } from '../../util/helpers';
-import { ObjectValueBuilder } from '../../../src/model/object_value';
 
 describe('Mutation', () => {
   addEqualityMatcher();
@@ -58,122 +58,86 @@ describe('Mutation', () => {
 
   it('can apply sets to documents', () => {
     const docData = { foo: 'foo-value', baz: 'baz-value' };
-    const baseDoc = doc('collection/key', 0, docData);
+    const document = doc('collection/key', 0, docData);
 
     const set = setMutation('collection/key', { bar: 'bar-value' });
-    const setDoc = applyMutationToLocalView(set, baseDoc, baseDoc, timestamp);
-    expect(setDoc).to.deep.equal(
-      doc(
-        'collection/key',
-        0,
-        { bar: 'bar-value' },
-        { hasLocalMutations: true }
-      )
+    applyMutationToLocalView(set, document, timestamp);
+    expect(document).to.deep.equal(
+      doc('collection/key', 0, { bar: 'bar-value' }).setHasLocalMutations()
     );
   });
 
   it('can apply patches to documents', () => {
     const docData = { foo: { bar: 'bar-value' }, baz: 'baz-value' };
 
-    const baseDoc = doc('collection/key', 0, docData);
+    const document = doc('collection/key', 0, docData);
     const patch = patchMutation('collection/key', {
       'foo.bar': 'new-bar-value'
     });
 
-    const patchedDoc = applyMutationToLocalView(
-      patch,
-      baseDoc,
-      baseDoc,
-      timestamp
-    );
-    expect(patchedDoc).to.deep.equal(
-      doc(
-        'collection/key',
-        0,
-        { foo: { bar: 'new-bar-value' }, baz: 'baz-value' },
-        { hasLocalMutations: true }
-      )
+    applyMutationToLocalView(patch, document, timestamp);
+    expect(document).to.deep.equal(
+      doc('collection/key', 0, {
+        foo: { bar: 'new-bar-value' },
+        baz: 'baz-value'
+      }).setHasLocalMutations()
     );
   });
 
   it('can apply patches with merges to missing documents', () => {
     const timestamp = Timestamp.now();
 
-    const baseDoc = deletedDoc('collection/key', 0);
+    const document = deletedDoc('collection/key', 0);
     const patch = patchMutation(
       'collection/key',
       { 'foo.bar': 'new-bar-value' },
       Precondition.none()
     );
 
-    const patchedDoc = applyMutationToLocalView(
-      patch,
-      baseDoc,
-      baseDoc,
-      timestamp
-    );
-    expect(patchedDoc).to.deep.equal(
-      doc(
-        'collection/key',
-        0,
-        { foo: { bar: 'new-bar-value' } },
-        { hasLocalMutations: true }
-      )
+    applyMutationToLocalView(patch, document, timestamp);
+    expect(document).to.deep.equal(
+      doc('collection/key', 0, {
+        foo: { bar: 'new-bar-value' }
+      }).setHasLocalMutations()
     );
   });
 
   it('can apply patches with merges to null documents', () => {
     const timestamp = Timestamp.now();
 
-    const baseDoc = null;
+    const document = MutableDocument.newInvalidDocument(key('collection/key'));
     const patch = patchMutation(
       'collection/key',
       { 'foo.bar': 'new-bar-value' },
       Precondition.none()
     );
 
-    const patchedDoc = applyMutationToLocalView(
-      patch,
-      baseDoc,
-      baseDoc,
-      timestamp
-    );
-    expect(patchedDoc).to.deep.equal(
-      doc(
-        'collection/key',
-        0,
-        { foo: { bar: 'new-bar-value' } },
-        { hasLocalMutations: true }
-      )
+    applyMutationToLocalView(patch, document, timestamp);
+    expect(document).to.deep.equal(
+      doc('collection/key', 0, {
+        foo: { bar: 'new-bar-value' }
+      }).setHasLocalMutations()
     );
   });
 
   it('will delete values from the field-mask', () => {
-    const baseDoc = doc('collection/key', 0, {
+    const document = doc('collection/key', 0, {
       foo: { bar: 'bar-value', baz: 'baz-value' }
     });
     const patch = patchMutation('collection/key', {
       'foo.bar': FieldValue.delete()
     });
 
-    const patchedDoc = applyMutationToLocalView(
-      patch,
-      baseDoc,
-      baseDoc,
-      timestamp
-    );
-    expect(patchedDoc).to.deep.equal(
-      doc(
-        'collection/key',
-        0,
-        { foo: { baz: 'baz-value' } },
-        { hasLocalMutations: true }
-      )
+    applyMutationToLocalView(patch, document, timestamp);
+    expect(document).to.deep.equal(
+      doc('collection/key', 0, {
+        foo: { baz: 'baz-value' }
+      }).setHasLocalMutations()
     );
   });
 
   it('will patch a primitive value', () => {
-    const baseDoc = doc('collection/key', 0, {
+    const document = doc('collection/key', 0, {
       foo: 'foo-value',
       baz: 'baz-value'
     });
@@ -181,74 +145,52 @@ describe('Mutation', () => {
       'foo.bar': 'new-bar-value'
     });
 
-    const patchedDoc = applyMutationToLocalView(
-      patch,
-      baseDoc,
-      baseDoc,
-      timestamp
-    );
-    expect(patchedDoc).to.deep.equal(
-      doc(
-        'collection/key',
-        0,
-        { foo: { bar: 'new-bar-value' }, baz: 'baz-value' },
-        { hasLocalMutations: true }
-      )
+    applyMutationToLocalView(patch, document, timestamp);
+    expect(document).to.deep.equal(
+      doc('collection/key', 0, {
+        foo: { bar: 'new-bar-value' },
+        baz: 'baz-value'
+      }).setHasLocalMutations()
     );
   });
 
   it('patching a NoDocument yields a NoDocument', () => {
-    const baseDoc = deletedDoc('collection/key', 0);
+    const document = deletedDoc('collection/key', 0);
     const patch = patchMutation('collection/key', { foo: 'bar' });
-    const patchedDoc = applyMutationToLocalView(
-      patch,
-      baseDoc,
-      baseDoc,
-      timestamp
-    );
-    expect(patchedDoc).to.deep.equal(baseDoc);
+    applyMutationToLocalView(patch, document, timestamp);
+    expect(document).to.deep.equal(deletedDoc('collection/key', 0));
   });
 
   it('can apply local serverTimestamp transforms to documents', () => {
     const docData = { foo: { bar: 'bar-value' }, baz: 'baz-value' };
 
-    const baseDoc = doc('collection/key', 0, docData);
-    const transform = transformMutation('collection/key', {
+    const document = doc('collection/key', 0, docData);
+    const transform = patchMutation('collection/key', {
       'foo.bar': FieldValue.serverTimestamp()
     });
 
-    const transformedDoc = applyMutationToLocalView(
-      transform,
-      baseDoc,
-      baseDoc,
-      timestamp
-    );
+    applyMutationToLocalView(transform, document, timestamp);
 
     // Server timestamps aren't parsed, so we manually insert it.
-    const data = new ObjectValueBuilder(
-      wrapObject({
-        foo: { bar: '<server-timestamp>' },
-        baz: 'baz-value'
-      })
-    )
-      .set(field('foo.bar'), serverTimestamp(timestamp, null))
-      .build();
-    const expectedDoc = new Document(key('collection/key'), version(0), data, {
-      hasLocalMutations: true
+    const data = wrapObject({
+      foo: { bar: '<server-timestamp>' },
+      baz: 'baz-value'
     });
+    data.set(field('foo.bar'), serverTimestamp(timestamp, null));
+    const expectedDoc = doc('collection/key', 0, data).setHasLocalMutations();
 
-    expect(transformedDoc).to.deep.equal(expectedDoc);
+    expect(document).to.deep.equal(expectedDoc);
   });
 
   // NOTE: This is more a test of UserDataReader code than Mutation code but
   // we don't have unit tests for it currently. We could consider removing this
   // test once we have integration tests.
   it('can create arrayUnion() transform.', () => {
-    const transform = transformMutation('collection/key', {
+    const transform = patchMutation('collection/key', {
       foo: FieldValue.arrayUnion('tag'),
       'bar.baz': FieldValue.arrayUnion(true, { nested: { a: [1, 2] } })
     });
-    expect(transform.fieldTransforms.length).to.equal(2);
+    expect(transform.fieldTransforms).to.have.lengthOf(2);
 
     const first = transform.fieldTransforms[0];
     expect(first.field).to.deep.equal(field('foo'));
@@ -270,10 +212,10 @@ describe('Mutation', () => {
   // we don't have unit tests for it currently. We could consider removing this
   // test once we have integration tests.
   it('can create arrayRemove() transform.', () => {
-    const transform = transformMutation('collection/key', {
+    const transform = patchMutation('collection/key', {
       foo: FieldValue.arrayRemove('tag')
     });
-    expect(transform.fieldTransforms.length).to.equal(1);
+    expect(transform.fieldTransforms).to.have.lengthOf(1);
 
     const first = transform.fieldTransforms[0];
     expect(first.field).to.deep.equal(field('foo'));
@@ -385,34 +327,29 @@ describe('Mutation', () => {
     transformData: Dict<unknown> | Array<Dict<unknown>>,
     expectedData: Dict<unknown>
   ): void {
-    const baseDoc = doc('collection/key', 0, baseData);
-    let transformedDoc: MaybeDocument | null = baseDoc;
-
+    const document = doc('collection/key', 0, baseData);
     const transforms = Array.isArray(transformData)
       ? transformData
       : [transformData];
 
     for (const transformData of transforms) {
-      const transform = transformMutation('collection/key', transformData);
-      transformedDoc = applyMutationToLocalView(
-        transform,
-        transformedDoc,
-        transformedDoc,
-        timestamp
-      );
+      const transform = patchMutation('collection/key', transformData);
+      applyMutationToLocalView(transform, document, timestamp);
     }
 
-    const expectedDoc = doc('collection/key', 0, expectedData, {
-      hasLocalMutations: true
-    });
-    expect(transformedDoc).to.deep.equal(expectedDoc);
+    const expectedDoc = doc(
+      'collection/key',
+      0,
+      expectedData
+    ).setHasLocalMutations();
+    expect(document).to.deep.equal(expectedDoc);
   }
 
   it('can apply server-acked serverTimestamp transform to documents', () => {
     const docData = { foo: { bar: 'bar-value' }, baz: 'baz-value' };
 
-    const baseDoc = doc('collection/key', 0, docData);
-    const transform = transformMutation('collection/key', {
+    const document = doc('collection/key', 0, docData);
+    const transform = patchMutation('collection/key', {
       'foo.bar': FieldValue.serverTimestamp()
     });
 
@@ -424,45 +361,33 @@ describe('Mutation', () => {
         }
       }
     ]);
-    const transformedDoc = applyMutationToRemoteDocument(
-      transform,
-      baseDoc,
-      mutationResult
-    );
+    applyMutationToRemoteDocument(transform, document, mutationResult);
 
-    expect(transformedDoc).to.deep.equal(
-      doc(
-        'collection/key',
-        1,
-        { foo: { bar: timestamp.toDate() }, baz: 'baz-value' },
-        { hasCommittedMutations: true }
-      )
+    expect(document).to.deep.equal(
+      doc('collection/key', 1, {
+        foo: { bar: timestamp.toDate() },
+        baz: 'baz-value'
+      }).setHasCommittedMutations()
     );
   });
 
   it('can apply server-acked array transforms to document', () => {
     const docData = { array1: [1, 2], array2: ['a', 'b'] };
-    const baseDoc = doc('collection/key', 0, docData);
-    const transform = transformMutation('collection/key', {
+    const document = doc('collection/key', 0, docData);
+    const transform = setMutation('collection/key', {
       array1: FieldValue.arrayUnion(2, 3),
       array2: FieldValue.arrayRemove('a', 'c')
     });
 
     // Server just sends null transform results for array operations.
     const mutationResult = new MutationResult(version(1), [null, null]);
-    const transformedDoc = applyMutationToRemoteDocument(
-      transform,
-      baseDoc,
-      mutationResult
-    );
+    applyMutationToRemoteDocument(transform, document, mutationResult);
 
-    expect(transformedDoc).to.deep.equal(
-      doc(
-        'collection/key',
-        1,
-        { array1: [1, 2, 3], array2: ['b'] },
-        { hasCommittedMutations: true }
-      )
+    expect(document).to.deep.equal(
+      doc('collection/key', 1, {
+        array1: [1, 2, 3],
+        array2: ['b']
+      }).setHasCommittedMutations()
     );
   });
 
@@ -529,131 +454,97 @@ describe('Mutation', () => {
 
   it('can apply server-acked numeric add transform to document', () => {
     const docData = { sum: 1 };
-    const baseDoc = doc('collection/key', 0, docData);
-    const transform = transformMutation('collection/key', {
+    const document = doc('collection/key', 0, docData);
+    const transform = setMutation('collection/key', {
       sum: FieldValue.increment(2)
     });
 
     const mutationResult = new MutationResult(version(1), [
       { integerValue: 3 }
     ]);
-    const transformedDoc = applyMutationToRemoteDocument(
-      transform,
-      baseDoc,
-      mutationResult
-    );
+    applyMutationToRemoteDocument(transform, document, mutationResult);
 
-    expect(transformedDoc).to.deep.equal(
-      doc('collection/key', 1, { sum: 3 }, { hasCommittedMutations: true })
+    expect(document).to.deep.equal(
+      doc('collection/key', 1, { sum: 3 }).setHasCommittedMutations()
     );
   });
 
   it('can apply deletes to documents', () => {
-    const baseDoc = doc('collection/key', 0, { foo: 'bar' });
+    const document = doc('collection/key', 0, { foo: 'bar' });
 
     const mutation = deleteMutation('collection/key');
-    const result = applyMutationToLocalView(
-      mutation,
-      baseDoc,
-      baseDoc,
-      Timestamp.now()
-    );
-    expect(result).to.deep.equal(deletedDoc('collection/key', 0));
+    applyMutationToLocalView(mutation, document, Timestamp.now());
+    expect(document).to.deep.equal(deletedDoc('collection/key', 0));
   });
 
   it('can apply sets with mutation results', () => {
-    const baseDoc = doc('collection/key', 0, { foo: 'bar' });
+    const document = doc('collection/key', 0, { foo: 'bar' });
 
     const docSet = setMutation('collection/key', { foo: 'new-bar' });
     const setResult = mutationResult(4);
-    const setDoc = applyMutationToRemoteDocument(docSet, baseDoc, setResult);
-    expect(setDoc).to.deep.equal(
-      doc(
-        'collection/key',
-        4,
-        { foo: 'new-bar' },
-        { hasCommittedMutations: true }
-      )
+    applyMutationToRemoteDocument(docSet, document, setResult);
+    expect(document).to.deep.equal(
+      doc('collection/key', 4, { foo: 'new-bar' }).setHasCommittedMutations()
     );
   });
 
   it('will apply patches with mutation results', () => {
-    const baseDoc = doc('collection/key', 0, { foo: 'bar' });
+    const document = doc('collection/key', 0, { foo: 'bar' });
 
     const mutation = patchMutation('collection/key', { foo: 'new-bar' });
     const result = mutationResult(5);
-    const patchedDoc = applyMutationToRemoteDocument(mutation, baseDoc, result);
-    expect(patchedDoc).to.deep.equal(
-      doc(
-        'collection/key',
-        5,
-        { foo: 'new-bar' },
-        {
-          hasCommittedMutations: true
-        }
-      )
+    applyMutationToRemoteDocument(mutation, document, result);
+    expect(document).to.deep.equal(
+      doc('collection/key', 5, { foo: 'new-bar' }).setHasCommittedMutations()
     );
   });
 
   function assertVersionTransitions(
     mutation: Mutation,
-    base: MaybeDocument | null,
+    base: MutableDocument,
     mutationResult: MutationResult,
-    expected: MaybeDocument | null
+    expected: MutableDocument
   ): void {
-    const actual = applyMutationToRemoteDocument(
-      mutation,
-      base,
-      mutationResult
-    );
-    expect(actual).to.deep.equal(expected);
+    const documentCopy = base.clone();
+    applyMutationToRemoteDocument(mutation, documentCopy, mutationResult);
+    expect(documentCopy).to.deep.equal(expected);
   }
 
   it('transitions versions correctly', () => {
     const docV3 = doc('collection/key', 3, {});
     const deletedV3 = deletedDoc('collection/key', 3);
+    const invalidV3 = invalidDoc('collection/key');
 
     const set = setMutation('collection/key', {});
     const patch = patchMutation('collection/key', {});
-    const transform = transformMutation('collection/key', {});
     const deleter = deleteMutation('collection/key');
 
     const mutationResult = new MutationResult(
       version(7),
-      /*transformResults=*/ null
+      /*transformResults=*/ []
     );
-    const transformResult = new MutationResult(version(7), []);
     const docV7Unknown = unknownDoc('collection/key', 7);
-    const docV7Deleted = deletedDoc('collection/key', 7, {
-      hasCommittedMutations: true
-    });
+    const docV7Deleted = deletedDoc(
+      'collection/key',
+      7
+    ).setHasCommittedMutations();
     const docV7Committed = doc(
       'collection/key',
       7,
-      {},
-      { hasCommittedMutations: true }
-    );
+      {}
+    ).setHasCommittedMutations();
 
     assertVersionTransitions(set, docV3, mutationResult, docV7Committed);
     assertVersionTransitions(set, deletedV3, mutationResult, docV7Committed);
-    assertVersionTransitions(set, null, mutationResult, docV7Committed);
+    assertVersionTransitions(set, invalidV3, mutationResult, docV7Committed);
 
     assertVersionTransitions(patch, docV3, mutationResult, docV7Committed);
     assertVersionTransitions(patch, deletedV3, mutationResult, docV7Unknown);
-    assertVersionTransitions(patch, null, mutationResult, docV7Unknown);
-
-    assertVersionTransitions(transform, docV3, transformResult, docV7Committed);
-    assertVersionTransitions(
-      transform,
-      deletedV3,
-      transformResult,
-      docV7Unknown
-    );
-    assertVersionTransitions(transform, null, transformResult, docV7Unknown);
+    assertVersionTransitions(patch, invalidV3, mutationResult, docV7Unknown);
 
     assertVersionTransitions(deleter, docV3, mutationResult, docV7Deleted);
     assertVersionTransitions(deleter, deletedV3, mutationResult, docV7Deleted);
-    assertVersionTransitions(deleter, null, mutationResult, docV7Deleted);
+    assertVersionTransitions(deleter, invalidV3, mutationResult, docV7Deleted);
   });
 
   it('extracts null base value for non-transform mutation', () => {
@@ -680,7 +571,7 @@ describe('Mutation', () => {
     };
 
     // Server timestamps are idempotent and don't have base values.
-    const transform = transformMutation('collection/key', allTransforms);
+    const transform = patchMutation('collection/key', allTransforms);
     expect(extractMutationBaseValue(transform, baseDoc)).to.be.null;
   });
 
@@ -709,7 +600,7 @@ describe('Mutation', () => {
         missing: FieldValue.increment(1)
       }
     };
-    const transform = transformMutation('collection/key', allTransforms);
+    const transform = patchMutation('collection/key', allTransforms);
 
     const expectedBaseValue = wrapObject({
       double: 42.0,
@@ -725,25 +616,15 @@ describe('Mutation', () => {
   });
 
   it('increment twice', () => {
-    const baseDoc = doc('collection/key', 0, { sum: 0 });
+    const document = doc('collection/key', 0, { sum: 0 });
 
     const increment = { sum: FieldValue.increment(1) };
-    const transform = transformMutation('collection/key', increment);
+    const transform = setMutation('collection/key', increment);
 
-    let mutatedDoc = applyMutationToLocalView(
-      transform,
-      baseDoc,
-      baseDoc,
-      Timestamp.now()
-    );
-    mutatedDoc = applyMutationToLocalView(
-      transform,
-      mutatedDoc,
-      baseDoc,
-      Timestamp.now()
-    );
+    applyMutationToLocalView(transform, document, Timestamp.now());
+    applyMutationToLocalView(transform, document, Timestamp.now());
 
-    expect(mutatedDoc).to.be.an.instanceof(Document);
-    expect((mutatedDoc as Document).field(field('sum'))).to.deep.equal(wrap(2));
+    expect(document.isFoundDocument()).to.be.true;
+    expect(document.data.field(field('sum'))).to.deep.equal(wrap(2));
   });
 });

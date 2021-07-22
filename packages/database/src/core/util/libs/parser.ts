@@ -15,14 +15,10 @@
  * limitations under the License.
  */
 
-import { Path } from '../Path';
 import { RepoInfo } from '../../RepoInfo';
+import { Path } from '../Path';
 import { warnIfPageIsSecure, warn, fatal } from '../util';
 
-/**
- * @param {!string} pathString
- * @return {string}
- */
 function decodePath(pathString: string): string {
   let pathStringDecoded = '';
   const pieces = pathString.split('/');
@@ -39,8 +35,7 @@ function decodePath(pathString: string): string {
 }
 
 /**
- * @param {!string} queryString
- * @return {!{[key:string]:string}} key value hash
+ * @returns key value hash
  */
 function decodeQuery(queryString: string): { [key: string]: string } {
   const results = {};
@@ -61,13 +56,9 @@ function decodeQuery(queryString: string): { [key: string]: string } {
   return results;
 }
 
-/**
- *
- * @param {!string} dataURL
- * @return {{repoInfo: !RepoInfo, path: !Path}}
- */
 export const parseRepoInfo = function (
-  dataURL: string
+  dataURL: string,
+  nodeAdmin: boolean
 ): { repoInfo: RepoInfo; path: Path } {
   const parsedUrl = parseDatabaseURL(dataURL),
     namespace = parsedUrl.namespace;
@@ -101,6 +92,7 @@ export const parseRepoInfo = function (
       parsedUrl.host,
       parsedUrl.secure,
       namespace,
+      nodeAdmin,
       webSocketOnly,
       /*persistenceKey=*/ '',
       /*includeNamespaceInQueryParams=*/ namespace !== parsedUrl.subdomain
@@ -109,11 +101,6 @@ export const parseRepoInfo = function (
   };
 };
 
-/**
- *
- * @param {!string} dataURL
- * @return {{host: string, port: number, domain: string, subdomain: string, secure: boolean, scheme: string, pathString: string, namespace: string}}
- */
 export const parseDatabaseURL = function (
   dataURL: string
 ): {

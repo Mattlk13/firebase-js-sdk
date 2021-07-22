@@ -15,63 +15,25 @@
  * limitations under the License.
  */
 
-import { resolve } from 'path';
-import resolveModule from 'rollup-plugin-node-resolve';
-import commonjs from 'rollup-plugin-commonjs';
-import sourcemaps from 'rollup-plugin-sourcemaps';
-import rollupTypescriptPlugin from 'rollup-plugin-typescript2';
-import typescript from 'typescript';
-import { uglify } from 'rollup-plugin-uglify';
-import json from 'rollup-plugin-json';
-import pkg from './package.json';
 import appPkg from './app/package.json';
+import commonjs from '@rollup/plugin-commonjs';
+import json from '@rollup/plugin-json';
+import pkg from './package.json';
+import { resolve } from 'path';
+import resolveModule from '@rollup/plugin-node-resolve';
+import rollupTypescriptPlugin from 'rollup-plugin-typescript2';
+import sourcemaps from 'rollup-plugin-sourcemaps';
+import typescript from 'typescript';
+import alias from '@rollup/plugin-alias';
 
 const external = Object.keys(pkg.dependencies || {});
-
-/**
- * Global UMD Build
- */
-const GLOBAL_NAME = 'firebase';
-
-function createUmdOutputConfig(output, componentName) {
-  return {
-    file: output,
-    format: 'umd',
-    sourcemap: true,
-    extend: true,
-    name: `${GLOBAL_NAME}.${componentName}`,
-    globals: {
-      '@firebase/app-exp': `${GLOBAL_NAME}.app`
-    },
-
-    /**
-     * use iife to avoid below error in the old Safari browser
-     * SyntaxError: Functions cannot be declared in a nested block in strict mode
-     * https://github.com/firebase/firebase-js-sdk/issues/1228
-     *
-     */
-    intro: `
-          try {
-            (function() {`,
-    outro: `
-          }).apply(this, arguments);
-        } catch(err) {
-            console.error(err);
-            throw new Error(
-              'Cannot instantiate ${output} - ' +
-              'be sure to load firebase-app.js first.'
-            );
-          }`
-  };
-}
-
 const plugins = [sourcemaps(), resolveModule(), json(), commonjs()];
 
 const typescriptPlugin = rollupTypescriptPlugin({
   typescript
 });
 
-const typescriptPluginUMD = rollupTypescriptPlugin({
+const typescriptPluginCDN = rollupTypescriptPlugin({
   typescript,
   tsconfigOverride: {
     compilerOptions: {
@@ -95,19 +57,6 @@ const appBuilds = [
     ],
     plugins: [...plugins, typescriptPlugin],
     external
-  },
-  /**
-   * App UMD Builds
-   */
-  {
-    input: 'app/index.cdn.ts',
-    output: {
-      file: 'firebase-app.js',
-      sourcemap: true,
-      format: 'umd',
-      name: `${GLOBAL_NAME}.app`
-    },
-    plugins: [...plugins, typescriptPluginUMD, uglify()]
   }
 ];
 
@@ -133,15 +82,51 @@ const componentBuilds = pkg.components
         ],
         plugins: [...plugins, typescriptPlugin],
         external
-      },
-      {
-        input: `${component}/index.ts`,
-        output: createUmdOutputConfig(`firebase-${component}.js`, component),
-        plugins: [...plugins, typescriptPluginUMD, uglify()],
-        external: ['@firebase/app-exp']
       }
     ];
   })
   .reduce((a, b) => a.concat(b), []);
 
-export default [...appBuilds, ...componentBuilds];
+/**
+ * CDN script builds
+ */
+const FIREBASE_APP_URL = `https://www.gstatic.com/firebasejs/${pkg.version}/firebase-app.js`;
+const cdnBuilds = [
+  {
+    input: 'app/index.cdn.ts',
+    output: {
+      file: 'firebase-app.js',
+      sourcemap: true,
+      format: 'es'
+    },
+    plugins: [...plugins, typescriptPluginCDN]
+  },
+  ...pkg.components
+    .filter(component => component !== 'app')
+    .map(component => {
+      // It is needed for handling sub modules, for example firestore/lite which should produce firebase-firestore-lite.js
+      // Otherwise, we will create a directory with '/' in the name.
+      const componentName = component.replace('/', '-');
+
+      return {
+        input: `${component}/index.ts`,
+        output: {
+          file: `firebase-${componentName}.js`,
+          sourcemap: true,
+          format: 'es'
+        },
+        plugins: [
+          ...plugins,
+          typescriptPluginCDN,
+          alias({
+            entries: {
+              '@firebase/app': FIREBASE_APP_URL
+            }
+          })
+        ],
+        external: [FIREBASE_APP_URL]
+      };
+    })
+];
+
+export default [...appBuilds, ...componentBuilds, ...cdnBuilds];

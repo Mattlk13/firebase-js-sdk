@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2017 Google Inc.
+ * Copyright 2017 Google LLC
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -197,6 +197,13 @@ fireauth.exportlib.exportPrototypeMethods(
         name: 'useDeviceLanguage',
         args: []
       },
+      useEmulator: {
+        name: 'useEmulator',
+        args: [
+          fireauth.args.string('url'),
+          fireauth.args.object('options', true)
+        ]
+      },
       verifyPasswordResetCode: {
         name: 'verifyPasswordResetCode',
         args: [fireauth.args.string('code')]
@@ -218,7 +225,9 @@ fireauth.exportlib.exportPrototypeProperties(
             fireauth.args.string(),
             fireauth.args.null(),
             'tenantId')
-      }
+      },
+      // emulatorConfig is omitted here as it is readonly and therefore does not
+      // need argument validation.
     });
 
 // Exports firebase.auth.Auth.Persistence.
@@ -752,7 +761,16 @@ fireauth.exportlib.exportFunction(
       'multipleInstances': false,
       'serviceProps': namespace,
       'instantiationMode': 'LAZY',
-      'type':  'PUBLIC'
+      'type':  'PUBLIC',
+      /**
+       * Initialize auth-internal after auth is initialized to make auth available to other firebase products.
+       */
+      'onInstanceCreated': function (container, _instanceIdentifier, _instance) {
+          const authInternalProvider = container['getProvider'](
+            'auth-internal'
+          );
+          authInternalProvider['initialize']();
+        }
     };
   
     // Provides Auth internal APIs.

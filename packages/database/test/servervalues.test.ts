@@ -16,10 +16,11 @@
  */
 
 import { expect } from 'chai';
-import { getFreshRepoFromReference, getRandomNode } from './helpers/util';
+
 import { Database } from '../src/api/Database';
 import { Reference } from '../src/api/Reference';
-import { nodeFromJSON } from '../src/core/snap/nodeFromJSON';
+
+import { getRandomNode } from './helpers/util';
 
 describe('ServerValue tests', () => {
   it('resolves timestamps locally', async () => {

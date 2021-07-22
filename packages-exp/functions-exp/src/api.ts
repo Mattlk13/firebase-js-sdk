@@ -15,57 +15,63 @@
  * limitations under the License.
  */
 
-import { _getProvider } from '@firebase/app-exp';
-import { FirebaseApp } from '@firebase/app-types-exp';
+import { _getProvider, FirebaseApp, getApp } from '@firebase/app-exp';
 import { FUNCTIONS_TYPE } from './constants';
 
 import { Provider } from '@firebase/component';
-import {
-  Functions,
-  HttpsCallableOptions,
-  HttpsCallable
-} from '@firebase/functions-types-exp';
+import { Functions, HttpsCallableOptions, HttpsCallable } from './public-types';
 import {
   FunctionsService,
   DEFAULT_REGION,
-  useFunctionsEmulator as _useFunctionsEmulator,
+  connectFunctionsEmulator as _connectFunctionsEmulator,
   httpsCallable as _httpsCallable
 } from './service';
+import { getModularInstance } from '@firebase/util';
+
+export * from './public-types';
 
 /**
  * Returns a Functions instance for the given app.
  * @param app - The FirebaseApp to use.
- * @param region - The region the callable functions are located in.
+ * @param regionOrCustomDomain - one of:
+ *   a) The region the callable functions are located in (ex: us-central1)
+ *   b) A custom domain hosting the callable functions (ex: https://mydomain.com)
  * @public
  */
 export function getFunctions(
-  app: FirebaseApp,
-  region: string = DEFAULT_REGION
+  app: FirebaseApp = getApp(),
+  regionOrCustomDomain: string = DEFAULT_REGION
 ): Functions {
   // Dependencies
-  const functionsProvider: Provider<'functions'> = _getProvider(
-    app,
+  const functionsProvider: Provider<'functions-exp'> = _getProvider(
+    getModularInstance(app),
     FUNCTIONS_TYPE
   );
   const functionsInstance = functionsProvider.getImmediate({
-    identifier: region
+    identifier: regionOrCustomDomain
   });
   return functionsInstance;
 }
 
 /**
- * Changes this instance to point to a Cloud Functions emulator running
- * locally. See https://firebase.google.com/docs/functions/local-emulator
+ * Modify this instance to communicate with the Cloud Functions emulator.
  *
- * @param origin - The origin of the local emulator, such as
- * "http://localhost:5005".
+ * Note: this must be called before this instance has been used to do any operations.
+ *
+ * @param host - The emulator host (ex: localhost)
+ * @param port - The emulator port (ex: 5001)
  * @public
  */
-export function useFunctionsEmulator(
+export function connectFunctionsEmulator(
   functionsInstance: Functions,
-  origin: string
+  host: string,
+  port: number
 ): void {
-  _useFunctionsEmulator(functionsInstance as FunctionsService, origin);
+  _connectFunctionsEmulator(
+    getModularInstance<FunctionsService>(functionsInstance as FunctionsService),
+    host,
+    port
+  );
 }
 
 /**
@@ -73,10 +79,14 @@ export function useFunctionsEmulator(
  * @param name - The name of the trigger.
  * @public
  */
-export function httpsCallable(
+export function httpsCallable<RequestData = unknown, ResponseData = unknown>(
   functionsInstance: Functions,
   name: string,
   options?: HttpsCallableOptions
-): HttpsCallable {
-  return _httpsCallable(functionsInstance as FunctionsService, name, options);
+): HttpsCallable<RequestData, ResponseData> {
+  return _httpsCallable<RequestData, ResponseData>(
+    getModularInstance<FunctionsService>(functionsInstance as FunctionsService),
+    name,
+    options
+  );
 }

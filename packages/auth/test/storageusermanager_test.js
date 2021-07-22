@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2017 Google Inc.
+ * Copyright 2017 Google LLC
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,7 +31,6 @@ goog.require('fireauth.util');
 goog.require('goog.Promise');
 goog.require('goog.events');
 goog.require('goog.events.EventType');
-goog.require('goog.testing.MockClock');
 goog.require('goog.testing.PropertyReplacer');
 goog.require('goog.testing.events');
 goog.require('goog.testing.events.Event');
@@ -45,7 +44,6 @@ var config = {
   apiKey: 'apiKey1'
 };
 var appId = 'appId1';
-var clock;
 var expectedUser;
 var expectedUserWithAuthDomain;
 var stubs = new goog.testing.PropertyReplacer();
@@ -53,7 +51,8 @@ var testUser;
 var testUser2;
 var mockLocalStorage;
 var mockSessionStorage;
-var now = new Date();
+const now = Date.now();
+const nowDate = new Date(now);
 
 
 function setUp() {
@@ -70,7 +69,9 @@ function setUp() {
       function() {
         return false;
       });
-  clock = new goog.testing.MockClock(true);
+  stubs.replace(Date, 'now', function() {
+    return now;
+  });
   window.localStorage.clear();
   window.sessionStorage.clear();
   var config = {
@@ -88,14 +89,14 @@ function setUp() {
         {
           'uid': 'ENROLLMENT_UID1',
           'displayName': 'Work phone number',
-          'enrollmentTime': now.toUTCString(),
+          'enrollmentTime': nowDate.toUTCString(),
           'factorId': fireauth.constants.SecondFactorType.PHONE,
           'phoneNumber': '+16505551234'
         },
         {
           'uid': 'ENROLLMENT_UID2',
           'displayName': 'Spouse phone number',
-          'enrollmentTime': now.toUTCString(),
+          'enrollmentTime': nowDate.toUTCString(),
           'factorId': fireauth.constants.SecondFactorType.PHONE,
           'phoneNumber': '+16505556789'
         }
@@ -111,7 +112,8 @@ function setUp() {
   };
   var tokenResponse = {
     'idToken': fireauth.common.testHelper.createMockJwt(),
-    'refreshToken': 'refreshToken'
+    'refreshToken': 'refreshToken',
+    'expiresIn': '3600'
   };
   testUser = new fireauth.AuthUser(config, tokenResponse, accountInfo);
   testUser2 = new fireauth.AuthUser(config, tokenResponse, accountInfo2);
@@ -131,7 +133,6 @@ function tearDown() {
   if (testUser2) {
     testUser2.destroy();
   }
-  goog.dispose(clock);
 }
 
 
@@ -169,14 +170,14 @@ function testGetSetRemoveCurrentUser() {
         {
           'uid': 'ENROLLMENT_UID1',
           'displayName': 'Work phone number',
-          'enrollmentTime': now.toUTCString(),
+          'enrollmentTime': nowDate.toUTCString(),
           'factorId': fireauth.constants.SecondFactorType.PHONE,
           'phoneNumber': '+16505551234'
         },
         {
           'uid': 'ENROLLMENT_UID2',
           'displayName': 'Spouse phone number',
-          'enrollmentTime': now.toUTCString(),
+          'enrollmentTime': nowDate.toUTCString(),
           'factorId': fireauth.constants.SecondFactorType.PHONE,
           'phoneNumber': '+16505556789'
         }
@@ -185,12 +186,19 @@ function testGetSetRemoveCurrentUser() {
   };
   var tokenResponse = {
     'idToken': fireauth.common.testHelper.createMockJwt(),
-    'refreshToken': 'refreshToken'
+    'refreshToken': 'refreshToken',
+    'expiresIn': '3600'
   };
   expectedUser = new fireauth.AuthUser(config, tokenResponse, accountInfo);
   // Expected user with authDomain.
   expectedUserWithAuthDomain =
-      new fireauth.AuthUser(configWithAuthDomain, tokenResponse, accountInfo);
+    new fireauth.AuthUser(configWithAuthDomain, tokenResponse, accountInfo);
+  // Listen to calls on RPC Handler.
+  stubs.replace(
+    fireauth.RpcHandler.prototype,
+    'updateEmulatorConfig',
+    goog.testing.recordFunction(
+      fireauth.RpcHandler.prototype.updateEmulatorConfig));
   var storageKey = 'firebase:authUser:appId1';
   return goog.Promise.resolve()
       .then(function() {
@@ -210,7 +218,23 @@ function testGetSetRemoveCurrentUser() {
       })
       .then(function(user) {
         fireauth.common.testHelper.assertUserEquals(
-            expectedUserWithAuthDomain, user);
+          expectedUserWithAuthDomain, user);
+        // Get user with authDomain & emulator config.
+        return userManager.getCurrentUser('project.firebaseapp.com',
+          {
+            url: 'http://emulator.test.domain:1234'
+          });
+      })
+    .then(function () {
+      // Verify RpcHandler was notified of config change.
+      assertEquals(1,
+        fireauth.RpcHandler.prototype.updateEmulatorConfig.getCallCount());
+      assertObjectEquals(
+        {
+          url: 'http://emulator.test.domain:1234'
+        },
+        fireauth.RpcHandler.prototype.updateEmulatorConfig.getLastCall()
+          .getArgument(0));
         return userManager.removeCurrentUser();
       })
       .then(function() {

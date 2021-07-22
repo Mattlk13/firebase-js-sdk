@@ -19,7 +19,8 @@ import { Service } from './api/service';
 import {
   Component,
   ComponentType,
-  ComponentContainer
+  ComponentContainer,
+  InstanceFactoryOptions
 } from '@firebase/component';
 import { _FirebaseNamespace } from '@firebase/app-types/private';
 
@@ -28,21 +29,35 @@ import { _FirebaseNamespace } from '@firebase/app-types/private';
  */
 const FUNCTIONS_TYPE = 'functions';
 
-function factory(container: ComponentContainer, region?: string): Service {
-  // Dependencies
-  const app = container.getProvider('app').getImmediate();
-  const authProvider = container.getProvider('auth-internal');
-  const messagingProvider = container.getProvider('messaging');
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return new Service(app, authProvider, messagingProvider, region);
-}
-
-export function registerFunctions(instance: _FirebaseNamespace): void {
+export function registerFunctions(
+  instance: _FirebaseNamespace,
+  fetchImpl: typeof fetch
+): void {
   const namespaceExports = {
     // no-inline
     Functions: Service
   };
+
+  function factory(
+    container: ComponentContainer,
+    { instanceIdentifier: regionOrCustomDomain }: InstanceFactoryOptions
+  ): Service {
+    // Dependencies
+    const app = container.getProvider('app').getImmediate();
+    const authProvider = container.getProvider('auth-internal');
+    const appCheckProvider = container.getProvider('app-check-internal');
+    const messagingProvider = container.getProvider('messaging');
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return new Service(
+      app,
+      authProvider,
+      messagingProvider,
+      appCheckProvider,
+      regionOrCustomDomain,
+      fetchImpl
+    );
+  }
   instance.INTERNAL.registerComponent(
     new Component(FUNCTIONS_TYPE, factory, ComponentType.PUBLIC)
       .setServiceProps(namespaceExports)

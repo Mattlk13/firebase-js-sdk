@@ -17,10 +17,15 @@
 
 import { expect } from 'chai';
 import * as sinon from 'sinon';
+
 import {
-  EventManager,
+  eventManagerListen,
+  eventManagerUnlisten,
   ListenOptions,
-  QueryListener
+  newEventManager,
+  eventManagerOnWatchChange,
+  QueryListener,
+  eventManagerOnOnlineStateChange
 } from '../../../src/core/event_manager';
 import { Query } from '../../../src/core/query';
 import { OnlineState } from '../../../src/core/types';
@@ -28,6 +33,7 @@ import { View } from '../../../src/core/view';
 import { ChangeType, ViewSnapshot } from '../../../src/core/view_snapshot';
 import { documentKeySet } from '../../../src/model/collections';
 import { DocumentSet } from '../../../src/model/document_set';
+import { Code, FirestoreError } from '../../../src/util/error';
 import { addEqualityMatcher } from '../../util/equality_matcher';
 import {
   ackTarget,
@@ -50,45 +56,47 @@ describe('EventManager', () => {
     };
   }
 
-  // mock object.
+  // mock objects.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  function makeSyncEngineSpy(): any {
-    const stub = {
-      listen: sinon.stub().returns(Promise.resolve(0)),
-      subscribe: sinon.spy(),
-      unlisten: sinon.spy()
-    };
-    return stub;
-  }
+  let onListenSpy: any, onUnlistenSpy: any;
+
+  beforeEach(() => {
+    onListenSpy = sinon.stub().returns(Promise.resolve(0));
+    onUnlistenSpy = sinon.spy();
+  });
 
   it('handles many listenables per query', async () => {
     const query1 = query('foo/bar');
     const fakeListener1 = fakeQueryListener(query1);
     const fakeListener2 = fakeQueryListener(query1);
 
-    const syncEngineSpy = makeSyncEngineSpy();
-    const eventManager = new EventManager(syncEngineSpy);
+    const eventManager = newEventManager();
+    eventManager.onListen = onListenSpy.bind(null);
+    eventManager.onUnlisten = onUnlistenSpy.bind(null);
 
-    await eventManager.listen(fakeListener1);
-    expect(syncEngineSpy.listen.calledWith(query1)).to.be.true;
+    await eventManagerListen(eventManager, fakeListener1);
+    expect(onListenSpy.calledWith(query1)).to.be.true;
 
-    await eventManager.listen(fakeListener2);
-    expect(syncEngineSpy.listen.callCount).to.equal(1);
+    await eventManagerListen(eventManager, fakeListener2);
+    expect(onListenSpy.callCount).to.equal(1);
 
-    await eventManager.unlisten(fakeListener2);
-    expect(syncEngineSpy.unlisten.callCount).to.equal(0);
+    await eventManagerUnlisten(eventManager, fakeListener2);
+    expect(onUnlistenSpy.callCount).to.equal(0);
 
-    await eventManager.unlisten(fakeListener1);
-    expect(syncEngineSpy.unlisten.calledWith(query1)).to.be.true;
+    await eventManagerUnlisten(eventManager, fakeListener1);
+    expect(onUnlistenSpy.calledWith(query1)).to.be.true;
   });
 
   it('handles unlisten on unknown listenable gracefully', async () => {
-    const syncEngineSpy = makeSyncEngineSpy();
     const query1 = query('foo/bar');
     const fakeListener1 = fakeQueryListener(query1);
-    const eventManager = new EventManager(syncEngineSpy);
-    await eventManager.unlisten(fakeListener1);
-    expect(syncEngineSpy.unlisten.callCount).to.equal(0);
+
+    const eventManager = newEventManager();
+    eventManager.onListen = onListenSpy.bind(null);
+    eventManager.onUnlisten = onUnlistenSpy.bind(null);
+
+    await eventManagerUnlisten(eventManager, fakeListener1);
+    expect(onUnlistenSpy.callCount).to.equal(0);
   });
 
   it('notifies listenables in the right order', async () => {
@@ -109,13 +117,14 @@ describe('EventManager', () => {
       eventOrder.push('listenable3');
     };
 
-    const syncEngineSpy = makeSyncEngineSpy();
-    const eventManager = new EventManager(syncEngineSpy);
+    const eventManager = newEventManager();
+    eventManager.onListen = onListenSpy.bind(null);
+    eventManager.onUnlisten = onUnlistenSpy.bind(null);
 
-    await eventManager.listen(fakeListener1);
-    await eventManager.listen(fakeListener2);
-    await eventManager.listen(fakeListener3);
-    expect(syncEngineSpy.listen.callCount).to.equal(2);
+    await eventManagerListen(eventManager, fakeListener1);
+    await eventManagerListen(eventManager, fakeListener2);
+    await eventManagerListen(eventManager, fakeListener3);
+    expect(onListenSpy.callCount).to.equal(2);
 
     // mock ViewSnapshot.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -123,7 +132,7 @@ describe('EventManager', () => {
     // mock ViewSnapshot.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const viewSnap2: any = { query: query2 };
-    eventManager.onWatchChange([viewSnap1, viewSnap2]);
+    eventManagerOnWatchChange(eventManager, [viewSnap1, viewSnap2]);
 
     expect(eventOrder).to.deep.equal([
       'listenable1',
@@ -140,12 +149,13 @@ describe('EventManager', () => {
       events.push(onlineState);
     };
 
-    const syncEngineSpy = makeSyncEngineSpy();
-    const eventManager = new EventManager(syncEngineSpy);
+    const eventManager = newEventManager();
+    eventManager.onListen = onListenSpy.bind(null);
+    eventManager.onUnlisten = onUnlistenSpy.bind(null);
 
-    await eventManager.listen(fakeListener1);
+    await eventManagerListen(eventManager, fakeListener1);
     expect(events).to.deep.equal([OnlineState.Unknown]);
-    eventManager.onOnlineStateChange(OnlineState.Online);
+    eventManagerOnOnlineStateChange(eventManager, OnlineState.Online);
     expect(events).to.deep.equal([OnlineState.Unknown, OnlineState.Online]);
   });
 });
@@ -156,7 +166,7 @@ describe('QueryListener', () => {
   function queryListener(
     query: Query,
     events?: ViewSnapshot[],
-    errors?: Error[],
+    errors?: FirestoreError[],
     options?: ListenOptions
   ): QueryListener {
     return new QueryListener(
@@ -167,7 +177,7 @@ describe('QueryListener', () => {
             events.push(snap);
           }
         },
-        error: (error: Error) => {
+        error: (error: FirestoreError) => {
           if (errors !== undefined) {
             errors.push(error);
           }
@@ -220,11 +230,11 @@ describe('QueryListener', () => {
   });
 
   it('raises error event', () => {
-    const events: Error[] = [];
+    const events: FirestoreError[] = [];
     const query1 = query('rooms/Eros');
 
     const listener = queryListener(query1, [], events);
-    const error = new Error('bad');
+    const error = new FirestoreError(Code.UNKNOWN, 'bad');
 
     listener.onError(error);
     expect(events[0]).to.deep.equal(error);
@@ -251,12 +261,7 @@ describe('QueryListener', () => {
   it("raises 'hasPendingWrites' for pending mutation in initial snapshot", () => {
     const events: ViewSnapshot[] = [];
     const query1 = query('rooms');
-    const doc1 = doc(
-      'rooms/Eros',
-      1,
-      { name: 'Eros' },
-      { hasLocalMutations: true }
-    );
+    const doc1 = doc('rooms/Eros', 1, { name: 'Eros' }).setHasLocalMutations();
 
     const eventListenable = queryListener(query1, events);
 
@@ -272,12 +277,9 @@ describe('QueryListener', () => {
   it("doesn't raise 'hasPendingWrites' for committed mutation in initial snapshot", () => {
     const events: ViewSnapshot[] = [];
     const query1 = query('rooms');
-    const doc1 = doc(
-      'rooms/Eros',
-      1,
-      { name: 'Eros' },
-      { hasCommittedMutations: true }
-    );
+    const doc1 = doc('rooms/Eros', 1, {
+      name: 'Eros'
+    }).setHasCommittedMutations();
 
     const eventListenable = queryListener(query1, events);
 
@@ -326,12 +328,7 @@ describe('QueryListener', () => {
     const filteredEvents: ViewSnapshot[] = [];
     const fullEvents: ViewSnapshot[] = [];
     const query1 = query('rooms');
-    const doc1 = doc(
-      'rooms/Eros',
-      1,
-      { name: 'Eros' },
-      { hasLocalMutations: true }
-    );
+    const doc1 = doc('rooms/Eros', 1, { name: 'Eros' }).setHasLocalMutations();
     const doc2 = doc('rooms/Hades', 2, { name: 'Hades' });
     const doc1prime = doc('rooms/Eros', 1, { name: 'Eros' });
     const doc3 = doc('rooms/Other', 3, { name: 'Other' });
@@ -375,12 +372,9 @@ describe('QueryListener', () => {
     () => {
       const filteredEvents: ViewSnapshot[] = [];
       const query1 = query('rooms');
-      const doc1 = doc(
-        'rooms/Eros',
-        1,
-        { name: 'Eros' },
-        { hasLocalMutations: true }
-      );
+      const doc1 = doc('rooms/Eros', 1, {
+        name: 'Eros'
+      }).setHasLocalMutations();
       const doc2 = doc('rooms/Hades', 2, { name: 'Hades' });
       const doc1prime = doc('rooms/Eros', 1, { name: 'Eros' });
       const doc3 = doc('rooms/Other', 3, { name: 'Other' });
@@ -414,22 +408,14 @@ describe('QueryListener', () => {
     // and instead wait for Watch to catch up.
     const events: ViewSnapshot[] = [];
     const query1 = query('coll');
-    const doc1 = doc('coll/a', 1, { time: 1 }, { hasLocalMutations: true });
+    const doc1 = doc('coll/a', 1, { time: 1 }).setHasLocalMutations();
     // This event is suppressed
-    const doc1Committed = doc(
-      'coll/a',
-      2,
-      { time: 2 },
-      { hasCommittedMutations: true }
-    );
+    const doc1Committed = doc('coll/a', 2, {
+      time: 2
+    }).setHasCommittedMutations();
     const doc1Acknowledged = doc('coll/a', 2, { time: 2 });
-    const doc2 = doc('coll/b', 1, { time: 1 }, { hasLocalMutations: true });
-    const doc2Modified = doc(
-      'coll/b',
-      2,
-      { time: 3 },
-      { hasLocalMutations: true }
-    );
+    const doc2 = doc('coll/b', 1, { time: 1 }).setHasLocalMutations();
+    const doc2Modified = doc('coll/b', 2, { time: 3 }).setHasLocalMutations();
     const doc2Acknowledged = doc('coll/b', 2, { time: 3 });
     const listener = queryListener(query1, events, [], {
       includeMetadataChanges: true

@@ -16,34 +16,29 @@
  */
 
 import * as firestore from '@firebase/firestore-types';
-
-import * as api from '../../src/protos/firestore_proto_api';
-
 import { expect } from 'chai';
 
 import { Blob } from '../../src/api/blob';
-import { fromDotSeparatedString } from '../../src/api/field_path';
-import { UserDataWriter } from '../../src/api/user_data_writer';
-import {
-  parseQueryValue,
-  parseUpdateData,
-  UserDataReader
-} from '../../src/api/user_data_reader';
+import { DocumentReference } from '../../src/api/database';
+import { Timestamp } from '../../src/api/timestamp';
+import { BundledDocuments } from '../../src/core/bundle';
 import { DatabaseId } from '../../src/core/database_info';
 import {
-  Bound,
-  Direction,
-  FieldFilter,
-  Filter,
   newQueryForPath,
-  Operator,
-  OrderBy,
   Query,
   queryToTarget,
   queryWithAddedFilter,
   queryWithAddedOrderBy
 } from '../../src/core/query';
 import { SnapshotVersion } from '../../src/core/snapshot_version';
+import {
+  Bound,
+  Direction,
+  FieldFilter,
+  Filter,
+  Operator,
+  OrderBy
+} from '../../src/core/target';
 import { TargetId } from '../../src/core/types';
 import {
   AddedLimboDocument,
@@ -52,37 +47,55 @@ import {
   View,
   ViewChange
 } from '../../src/core/view';
+import {
+  DeleteFieldValueImpl,
+  parseQueryValue,
+  parseSetData,
+  parseUpdateData,
+  UserDataReader
+} from '../../src/lite/user_data_reader';
 import { LocalViewChanges } from '../../src/local/local_view_changes';
 import { TargetData, TargetPurpose } from '../../src/local/target_data';
 import {
   DocumentKeySet,
   documentKeySet,
-  MaybeDocumentMap,
-  maybeDocumentMap
+  documentMap,
+  DocumentMap
 } from '../../src/model/collections';
 import {
   compareDocumentsByField,
   Document,
-  DocumentOptions,
-  MaybeDocument,
-  NoDocument,
-  UnknownDocument
+  MutableDocument
 } from '../../src/model/document';
 import { DocumentComparator } from '../../src/model/document_comparator';
 import { DocumentKey } from '../../src/model/document_key';
 import { DocumentSet } from '../../src/model/document_set';
-import { JsonObject, ObjectValue } from '../../src/model/object_value';
+import { FieldMask } from '../../src/model/field_mask';
 import {
   DeleteMutation,
-  FieldMask,
   MutationResult,
   PatchMutation,
   Precondition,
-  SetMutation,
-  TransformMutation
+  SetMutation
 } from '../../src/model/mutation';
+import { JsonObject, ObjectValue } from '../../src/model/object_value';
 import { FieldPath, ResourcePath } from '../../src/model/path';
+import { decodeBase64, encodeBase64 } from '../../src/platform/base64';
+import {
+  NamedQuery as ProtoNamedQuery,
+  BundleMetadata as ProtoBundleMetadata,
+  LimitType as ProtoLimitType
+} from '../../src/protos/firestore_bundle_proto';
+import * as api from '../../src/protos/firestore_proto_api';
 import { RemoteEvent, TargetChange } from '../../src/remote/remote_event';
+import {
+  JsonProtoSerializer,
+  toDocument,
+  toName,
+  toQueryTarget,
+  toTimestamp,
+  toVersion
+} from '../../src/remote/serializer';
 import {
   DocumentWatchChange,
   WatchChangeAggregator,
@@ -90,32 +103,22 @@ import {
   WatchTargetChangeState
 } from '../../src/remote/watch_change';
 import { debugAssert, fail } from '../../src/util/assert';
+import { ByteString } from '../../src/util/byte_string';
+import { Code, FirestoreError } from '../../src/util/error';
 import { primitiveComparator } from '../../src/util/misc';
 import { Dict, forEach } from '../../src/util/obj';
 import { SortedMap } from '../../src/util/sorted_map';
 import { SortedSet } from '../../src/util/sorted_set';
+import {
+  JSON_SERIALIZER,
+  TEST_DATABASE_ID
+} from '../unit/local/persistence_test_helpers';
+
 import { FIRESTORE } from './api_helpers';
-import { ByteString } from '../../src/util/byte_string';
-import { decodeBase64, encodeBase64 } from '../../src/platform/base64';
-import { JsonProtoSerializer } from '../../src/remote/serializer';
-import { Timestamp } from '../../src/api/timestamp';
-import { DocumentReference } from '../../src/api/database';
-import { DeleteFieldValueImpl } from '../../src/api/field_value';
-import { Code, FirestoreError } from '../../src/util/error';
-import { TEST_DATABASE_ID } from '../unit/local/persistence_test_helpers';
 
 /* eslint-disable no-restricted-globals */
 
 export type TestSnapshotVersion = number;
-
-export function testUserDataWriter(): UserDataWriter {
-  return new UserDataWriter(
-    TEST_DATABASE_ID,
-    /* timestampsInSnapshots= */ false,
-    'none',
-    key => new DocumentReference(key, FIRESTORE, /* converter= */ null)
-  );
-}
 
 export function testUserDataReader(useProto3Json?: boolean): UserDataReader {
   return new UserDataReader(
@@ -134,8 +137,8 @@ export function version(v: TestSnapshotVersion): SnapshotVersion {
 }
 
 export function ref(key: string, offset?: number): DocumentReference {
-  return new DocumentReference(
-    new DocumentKey(path(key, offset)),
+  return DocumentReference.forPath(
+    path(key, offset),
     FIRESTORE,
     /* converter= */ null
   );
@@ -144,29 +147,37 @@ export function ref(key: string, offset?: number): DocumentReference {
 export function doc(
   keyStr: string,
   ver: TestSnapshotVersion,
-  json: JsonObject<unknown>,
-  options: DocumentOptions = {}
-): Document {
-  return new Document(key(keyStr), version(ver), wrapObject(json), options);
+  jsonOrObjectValue: JsonObject<unknown> | ObjectValue
+): MutableDocument {
+  return MutableDocument.newFoundDocument(
+    key(keyStr),
+    version(ver),
+    jsonOrObjectValue instanceof ObjectValue
+      ? jsonOrObjectValue
+      : wrapObject(jsonOrObjectValue)
+  );
 }
 
 export function deletedDoc(
   keyStr: string,
-  ver: TestSnapshotVersion,
-  options: DocumentOptions = {}
-): NoDocument {
-  return new NoDocument(key(keyStr), version(ver), options);
+  ver: TestSnapshotVersion
+): MutableDocument {
+  return MutableDocument.newNoDocument(key(keyStr), version(ver));
 }
 
 export function unknownDoc(
   keyStr: string,
   ver: TestSnapshotVersion
-): UnknownDocument {
-  return new UnknownDocument(key(keyStr), version(ver));
+): MutableDocument {
+  return MutableDocument.newUnknownDocument(key(keyStr), version(ver));
 }
 
-export function removedDoc(keyStr: string): NoDocument {
-  return new NoDocument(key(keyStr), SnapshotVersion.min());
+export function removedDoc(keyStr: string): MutableDocument {
+  return MutableDocument.newNoDocument(key(keyStr), SnapshotVersion.min());
+}
+
+export function invalidDoc(keyStr: string): MutableDocument {
+  return MutableDocument.newInvalidDocument(key(keyStr));
 }
 
 export function wrap(value: unknown): api.Value {
@@ -188,9 +199,7 @@ export function key(path: string): DocumentKey {
   return new DocumentKey(new ResourcePath(splitPath(path, '/')));
 }
 
-export function keys(
-  ...documents: Array<MaybeDocument | string>
-): DocumentKeySet {
+export function keys(...documents: Array<Document | string>): DocumentKeySet {
   let keys = documentKeySet();
   for (const doc of documents) {
     keys = keys.add(typeof doc === 'string' ? key(doc) : doc.key);
@@ -203,7 +212,7 @@ export function path(path: string, offset?: number): ResourcePath {
 }
 
 export function field(path: string): FieldPath {
-  return fromDotSeparatedString(path)._internalPath;
+  return new FieldPath(path.split('.'));
 }
 
 export function mask(...paths: string[]): FieldMask {
@@ -225,7 +234,20 @@ export function setMutation(
   keyStr: string,
   json: JsonObject<unknown>
 ): SetMutation {
-  return new SetMutation(key(keyStr), wrapObject(json), Precondition.none());
+  const setKey = key(keyStr);
+  const parsed = parseSetData(
+    testUserDataReader(),
+    'setMutation',
+    setKey,
+    json,
+    false
+  );
+  return new SetMutation(
+    setKey,
+    parsed.data,
+    Precondition.none(),
+    parsed.fieldTransforms
+  );
 }
 
 export function patchMutation(
@@ -253,7 +275,8 @@ export function patchMutation(
     patchKey,
     parsed.data,
     parsed.fieldMask,
-    precondition
+    precondition,
+    parsed.fieldTransforms
   );
 }
 
@@ -261,30 +284,10 @@ export function deleteMutation(keyStr: string): DeleteMutation {
   return new DeleteMutation(key(keyStr), Precondition.none());
 }
 
-/**
- * Creates a TransformMutation by parsing any FieldValue sentinels in the
- * provided data. The data is expected to use dotted-notation for nested fields
- * (i.e. { "foo.bar": FieldValue.foo() } and must not contain any non-sentinel
- * data.
- */
-export function transformMutation(
-  keyStr: string,
-  data: Dict<unknown>
-): TransformMutation {
-  const transformKey = key(keyStr);
-  const result = parseUpdateData(
-    testUserDataReader(),
-    'transformMutation()',
-    transformKey,
-    data
-  );
-  return new TransformMutation(transformKey, result.fieldTransforms);
-}
-
 export function mutationResult(
   testVersion: TestSnapshotVersion
 ): MutationResult {
-  return new MutationResult(version(testVersion), /* transformResults= */ null);
+  return new MutationResult(version(testVersion), /* transformResults= */ []);
 }
 
 export function bound(
@@ -350,7 +353,7 @@ export function noChangeEvent(
 }
 
 export function docAddedRemoteEvent(
-  docOrDocs: MaybeDocument | MaybeDocument[],
+  docOrDocs: MutableDocument | MutableDocument[],
   updatedInTargets?: TargetId[],
   removedFromTargets?: TargetId[],
   activeTargets?: TargetId[]
@@ -382,7 +385,7 @@ export function docAddedRemoteEvent(
 
   for (const doc of docs) {
     debugAssert(
-      !(doc instanceof Document) || !doc.hasLocalMutations,
+      !doc.hasLocalMutations,
       "Docs from remote updates shouldn't have local changes."
     );
     const docChange = new DocumentWatchChange(
@@ -399,13 +402,13 @@ export function docAddedRemoteEvent(
 }
 
 export function docUpdateRemoteEvent(
-  doc: MaybeDocument,
+  doc: MutableDocument,
   updatedInTargets?: TargetId[],
   removedFromTargets?: TargetId[],
   limboTargets?: TargetId[]
 ): RemoteEvent {
   debugAssert(
-    !(doc instanceof Document) || !doc.hasLocalMutations,
+    !doc.hasLocalMutations,
     "Docs from remote updates shouldn't have local changes."
   );
   const docChange = new DocumentWatchChange(
@@ -428,11 +431,80 @@ export function docUpdateRemoteEvent(
   return aggregator.createRemoteEvent(doc.version);
 }
 
+export class TestBundledDocuments {
+  constructor(public documents: BundledDocuments, public bundleName: string) {}
+}
+
+export function bundledDocuments(
+  documents: MutableDocument[],
+  queryNames?: string[][],
+  bundleName?: string
+): TestBundledDocuments {
+  const result = documents.map((d, index) => {
+    return {
+      metadata: {
+        name: toName(JSON_SERIALIZER, d.key),
+        readTime: toVersion(JSON_SERIALIZER, d.version),
+        exists: d.isFoundDocument(),
+        queries: queryNames ? queryNames[index] : undefined
+      },
+      document: d.isFoundDocument() ? toDocument(JSON_SERIALIZER, d) : undefined
+    };
+  });
+
+  return new TestBundledDocuments(result, bundleName || '');
+}
+
+export class TestNamedQuery {
+  constructor(
+    public namedQuery: ProtoNamedQuery,
+    public matchingDocuments: DocumentKeySet
+  ) {}
+}
+
+export function namedQuery(
+  name: string,
+  query: Query,
+  limitType: ProtoLimitType,
+  readTime: SnapshotVersion,
+  matchingDocuments: DocumentKeySet = documentKeySet()
+): TestNamedQuery {
+  return {
+    namedQuery: {
+      name,
+      readTime: toTimestamp(JSON_SERIALIZER, readTime.toTimestamp()),
+      bundledQuery: {
+        parent: toQueryTarget(JSON_SERIALIZER, queryToTarget(query)).parent,
+        limitType,
+        structuredQuery: toQueryTarget(JSON_SERIALIZER, queryToTarget(query))
+          .structuredQuery
+      }
+    },
+    matchingDocuments
+  };
+}
+
+export function bundleMetadata(
+  id: string,
+  createTime: TestSnapshotVersion,
+  version = 1,
+  totalDocuments = 1,
+  totalBytes = 1000
+): ProtoBundleMetadata {
+  return {
+    id,
+    createTime: { seconds: createTime, nanos: 0 },
+    version,
+    totalDocuments,
+    totalBytes
+  };
+}
+
 export function updateMapping(
   snapshotVersion: SnapshotVersion,
-  added: Array<Document | string>,
-  modified: Array<Document | string>,
-  removed: Array<MaybeDocument | string>,
+  added: Array<MutableDocument | string>,
+  modified: Array<MutableDocument | string>,
+  removed: Array<MutableDocument | string>,
   current?: boolean
 ): TargetChange {
   let addedDocuments = documentKeySet();
@@ -440,15 +512,18 @@ export function updateMapping(
   let removedDocuments = documentKeySet();
 
   added.forEach(docOrKey => {
-    const k = docOrKey instanceof Document ? docOrKey.key : key(docOrKey);
+    const k =
+      docOrKey instanceof MutableDocument ? docOrKey.key : key(docOrKey);
     addedDocuments = addedDocuments.add(k);
   });
   modified.forEach(docOrKey => {
-    const k = docOrKey instanceof Document ? docOrKey.key : key(docOrKey);
+    const k =
+      docOrKey instanceof MutableDocument ? docOrKey.key : key(docOrKey);
     modifiedDocuments = modifiedDocuments.add(k);
   });
   removed.forEach(docOrKey => {
-    const k = docOrKey instanceof MaybeDocument ? docOrKey.key : key(docOrKey);
+    const k =
+      docOrKey instanceof MutableDocument ? docOrKey.key : key(docOrKey);
     removedDocuments = removedDocuments.add(k);
   });
 
@@ -462,7 +537,7 @@ export function updateMapping(
 }
 
 export function addTargetMapping(
-  ...docsOrKeys: Array<Document | string>
+  ...docsOrKeys: Array<MutableDocument | string>
 ): TargetChange {
   return updateMapping(
     SnapshotVersion.min(),
@@ -474,7 +549,7 @@ export function addTargetMapping(
 }
 
 export function ackTarget(
-  ...docsOrKeys: Array<Document | string>
+  ...docsOrKeys: Array<MutableDocument | string>
 ): TargetChange {
   return updateMapping(
     SnapshotVersion.min(),
@@ -594,15 +669,15 @@ export function mapAsArray<K, V>(
  */
 export function documentUpdates(
   ...docsOrKeys: Array<Document | DocumentKey>
-): MaybeDocumentMap {
-  let changes = maybeDocumentMap();
+): DocumentMap {
+  let changes = documentMap();
   for (const docOrKey of docsOrKeys) {
-    if (docOrKey instanceof Document) {
+    if (docOrKey instanceof MutableDocument) {
       changes = changes.insert(docOrKey.key, docOrKey);
     } else if (docOrKey instanceof DocumentKey) {
       changes = changes.insert(
         docOrKey,
-        new NoDocument(docOrKey, SnapshotVersion.min())
+        MutableDocument.newNoDocument(docOrKey, SnapshotVersion.min())
       );
     }
   }
@@ -638,7 +713,7 @@ export function documentSet(...args: unknown[]): DocumentSet {
   }
   for (const doc of args) {
     debugAssert(
-      doc instanceof Document,
+      doc instanceof MutableDocument,
       'Bad argument, expected Document: ' + doc
     );
     docSet = docSet.add(doc);

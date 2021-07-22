@@ -19,10 +19,11 @@ const path = require('path');
 const webpack = require('webpack');
 
 /**
- * A regular expression used to replace Firestore's platform specific modules,
- * which are located under 'packages/firestore/src/platform/'.
+ * A regular expression used to replace Firestore's and Storage's platform-
+ * specific modules, which are located under
+ * 'packages/(component)/src/platform/'.
  */
-const FIRESTORE_PLATFORM_RE = /^(.*)\/platform\/([^.\/]*)(\.ts)?$/;
+const PLATFORM_RE = /^(.*)\/platform\/([^.\/]*)(\.ts)?$/;
 
 module.exports = {
   mode: 'development',
@@ -74,25 +75,39 @@ module.exports = {
             ]
           }
         }
+      },
+      /**
+       * Transform firebase packages to cjs, so they can be stubbed in tests
+       */
+      {
+        test: /\.js$/,
+        include: function (modulePath) {
+          const match = /node_modules\/@firebase.*/.test(modulePath);
+          return match;
+        },
+        use: {
+          loader: 'babel-loader',
+          options: {
+            plugins: ['@babel/plugin-transform-modules-commonjs']
+          }
+        }
       }
     ]
   },
   resolve: {
     modules: ['node_modules', path.resolve(__dirname, '../../node_modules')],
-    mainFields: ['browser', 'main', 'module'],
-    extensions: ['.js', '.ts']
+    mainFields: ['browser', 'module', 'main'],
+    extensions: ['.js', '.ts'],
+    symlinks: false
   },
   plugins: [
-    new webpack.NormalModuleReplacementPlugin(
-      FIRESTORE_PLATFORM_RE,
-      resource => {
-        const targetPlatform = process.env.TEST_PLATFORM || 'browser';
-        resource.request = resource.request.replace(
-          FIRESTORE_PLATFORM_RE,
-          `$1/platform/${targetPlatform}/$2.ts`
-        );
-      }
-    ),
+    new webpack.NormalModuleReplacementPlugin(PLATFORM_RE, resource => {
+      const targetPlatform = process.env.TEST_PLATFORM || 'browser';
+      resource.request = resource.request.replace(
+        PLATFORM_RE,
+        `$1/platform/${targetPlatform}/$2.ts`
+      );
+    }),
     new webpack.EnvironmentPlugin([
       'RTDB_EMULATOR_PORT',
       'RTDB_EMULATOR_NAMESPACE'

@@ -16,33 +16,40 @@
  */
 
 import { User } from '../auth/user';
-import { Document, MaybeDocument } from '../model/document';
+import { ListenSequence } from '../core/listen_sequence';
+import { ListenSequenceNumber, TargetId } from '../core/types';
+import { Document } from '../model/document';
 import { DocumentKey } from '../model/document_key';
+import { estimateByteSize } from '../model/values';
+import { JsonProtoSerializer } from '../remote/serializer';
 import { fail } from '../util/assert';
 import { logDebug } from '../util/log';
 import { ObjectMap } from '../util/obj_map';
+
 import { encodeResourcePath } from './encoded_resource_path';
+import { LocalSerializer } from './local_serializer';
 import {
   ActiveTargets,
   LruDelegate,
   LruGarbageCollector,
   LruParams
 } from './lru_garbage_collector';
-import { ListenSequence } from '../core/listen_sequence';
-import { ListenSequenceNumber, TargetId } from '../core/types';
-import { estimateByteSize } from '../model/values';
+import { newLruGarbageCollector } from './lru_garbage_collector_impl';
+import { MemoryBundleCache } from './memory_bundle_cache';
 import { MemoryIndexManager } from './memory_index_manager';
 import { MemoryMutationQueue } from './memory_mutation_queue';
-import { MemoryRemoteDocumentCache } from './memory_remote_document_cache';
+import {
+  MemoryRemoteDocumentCache,
+  newMemoryRemoteDocumentCache
+} from './memory_remote_document_cache';
 import { MemoryTargetCache } from './memory_target_cache';
 import { MutationQueue } from './mutation_queue';
-import {
-  Persistence,
-  PersistenceTransaction,
-  PersistenceTransactionMode,
-  ReferenceDelegate
-} from './persistence';
+import { Persistence, ReferenceDelegate } from './persistence';
 import { PersistencePromise } from './persistence_promise';
+import {
+  PersistenceTransaction,
+  PersistenceTransactionMode
+} from './persistence_transaction';
 import { ReferenceSet } from './reference_set';
 import { TargetData } from './target_data';
 
@@ -63,7 +70,9 @@ export class MemoryPersistence implements Persistence {
   private mutationQueues: { [user: string]: MemoryMutationQueue } = {};
   private readonly remoteDocumentCache: MemoryRemoteDocumentCache;
   private readonly targetCache: MemoryTargetCache;
+  private readonly bundleCache: MemoryBundleCache;
   private readonly listenSequence = new ListenSequence(0);
+  private serializer: LocalSerializer;
 
   private _started = false;
 
@@ -76,18 +85,21 @@ export class MemoryPersistence implements Persistence {
    * checked or asserted on every access.
    */
   constructor(
-    referenceDelegateFactory: (p: MemoryPersistence) => MemoryReferenceDelegate
+    referenceDelegateFactory: (p: MemoryPersistence) => MemoryReferenceDelegate,
+    serializer: JsonProtoSerializer
   ) {
     this._started = true;
     this.referenceDelegate = referenceDelegateFactory(this);
     this.targetCache = new MemoryTargetCache(this);
-    const sizer = (doc: MaybeDocument): number =>
+    const sizer = (doc: Document): number =>
       this.referenceDelegate.documentSize(doc);
     this.indexManager = new MemoryIndexManager();
-    this.remoteDocumentCache = new MemoryRemoteDocumentCache(
+    this.remoteDocumentCache = newMemoryRemoteDocumentCache(
       this.indexManager,
       sizer
     );
+    this.serializer = new LocalSerializer(serializer);
+    this.bundleCache = new MemoryBundleCache(this.serializer);
   }
 
   start(): Promise<void> {
@@ -136,6 +148,10 @@ export class MemoryPersistence implements Persistence {
     return this.remoteDocumentCache;
   }
 
+  getBundleCache(): MemoryBundleCache {
+    return this.bundleCache;
+  }
+
   runTransaction<T>(
     action: string,
     mode: PersistenceTransactionMode,
@@ -182,7 +198,7 @@ export class MemoryTransaction extends PersistenceTransaction {
 }
 
 export interface MemoryReferenceDelegate extends ReferenceDelegate {
-  documentSize(doc: MaybeDocument): number;
+  documentSize(doc: Document): number;
   onTransactionStarted(): void;
   onTransactionCommitted(txn: PersistenceTransaction): PersistencePromise<void>;
 }
@@ -291,7 +307,7 @@ export class MemoryEagerDelegate implements MemoryReferenceDelegate {
     });
   }
 
-  documentSize(doc: MaybeDocument): number {
+  documentSize(doc: Document): number {
     // For eager GC, we don't care about the document size, there are no size thresholds.
     return 0;
   }
@@ -324,7 +340,7 @@ export class MemoryLruDelegate implements ReferenceDelegate, LruDelegate {
     private readonly persistence: MemoryPersistence,
     lruParams: LruParams
   ) {
-    this.garbageCollector = new LruGarbageCollector(this, lruParams);
+    this.garbageCollector = newLruGarbageCollector(this, lruParams);
   }
 
   // No-ops, present so memory persistence doesn't have to care which delegate
@@ -455,10 +471,10 @@ export class MemoryLruDelegate implements ReferenceDelegate, LruDelegate {
     return PersistencePromise.resolve();
   }
 
-  documentSize(maybeDoc: MaybeDocument): number {
-    let documentSize = maybeDoc.key.toString().length;
-    if (maybeDoc instanceof Document) {
-      documentSize += estimateByteSize(maybeDoc.toProto());
+  documentSize(document: Document): number {
+    let documentSize = document.key.toString().length;
+    if (document.isFoundDocument()) {
+      documentSize += estimateByteSize(document.data.value);
     }
     return documentSize;
   }

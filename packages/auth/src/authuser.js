@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2017 Google Inc.
+ * Copyright 2017 Google LLC
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -182,7 +182,12 @@ fireauth.AuthUser =
       this.apiKey_,
       // Get the client Auth endpoint used.
       fireauth.constants.getEndpointConfig(fireauth.constants.clientEndpoint),
-      clientFullVersion);
+    clientFullVersion);
+  /** @private {?fireauth.constants.EmulatorSettings} The emulator config */
+  this.emulatorConfig_ = appOptions['emulatorConfig'] || null;
+  if (this.emulatorConfig_) {
+    this.rpcHandler_.updateEmulatorConfig(this.emulatorConfig_);
+  }
   // TODO: Consider having AuthUser take a fireauth.StsTokenManager
   // instance instead of a token response but make sure lastAccessToken_ also
   // initialized at the right time. In this case initializeFromIdTokenResponse
@@ -209,7 +214,7 @@ fireauth.AuthUser =
       fireauth.util.isPopupRedirectSupported()) {
     // Get the Auth event manager associated with this user.
     this.authEventManager_ = fireauth.AuthEventManager.getManager(
-        this.authDomain_, this.apiKey_, this.appName_);
+        this.authDomain_, this.apiKey_, this.appName_, this.emulatorConfig_);
   }
   /** @private {!Array<!function(!fireauth.AuthUser):!goog.Promise>} The list of
    *      state change listeners. This is needed to make sure state changes are
@@ -248,6 +253,20 @@ fireauth.AuthUser =
    *     dispatcher.
    */
   this.languageCodeChangeEventDispatcher_ = null;
+
+  /**
+   * @private {function(!goog.events.Event)} The on emulator config changed
+   *     event handler.
+   */
+  this.onEmulatorConfigChanged_ = function (event) {
+    // Update the emulator config.
+    self.setEmulatorConfig(event.emulatorConfig);
+  };
+  /**
+   * @private {?goog.events.EventTarget} The emulator code change event
+   *     dispatcher.
+   */
+  this.emulatorConfigChangeEventDispatcher_ = null;
 
   /** @private {!Array<string>} The current Firebase frameworks. */
   this.frameworks_ = [];
@@ -288,6 +307,34 @@ fireauth.AuthUser.prototype.setLanguageCode = function(languageCode) {
 };
 
 
+/**
+ * Updates the emulator config.
+ * @param {?fireauth.constants.EmulatorSettings} emulatorConfig The current
+ *     emulator config to use in user requests.
+ */
+fireauth.AuthUser.prototype.setEmulatorConfig = function(emulatorConfig) {
+  // Update the emulator config.
+  this.emulatorConfig_ = emulatorConfig;
+  this.rpcHandler_.updateEmulatorConfig(emulatorConfig);
+
+  if (this.authEventManager_) {
+    // We need to get a new auth event manager keyed with the new emulator
+    // config.
+    const oldManager = this.authEventManager_;
+
+    // If authEventManager_ was previously set, we know authDomain_ is set as
+    // well.
+    this.authEventManager_ = fireauth.AuthEventManager.getManager(
+        /** @type {string} */ (this.authDomain_), this.apiKey_, this.appName_,
+        this.emulatorConfig_);
+    if (this.popupRedirectEnabled_) {
+      oldManager.unsubscribe(this);
+      this.authEventManager_.subscribe(this);
+    }
+  }
+};
+
+
 /** @return {?string} The current user's language code. */
 fireauth.AuthUser.prototype.getLanguageCode = function() {
   return this.languageCode_;
@@ -320,6 +367,32 @@ fireauth.AuthUser.prototype.setLanguageCodeChangeDispatcher =
         this.onLanguageCodeChanged_);
   }
 };
+
+
+/**
+  * Listens to emulator config changes triggered by the provided dispatcher.
+  * @param {?goog.events.EventTarget} dispatcher The emulator config changed
+  *     event dispatcher.
+  */
+fireauth.AuthUser.prototype.setEmulatorConfigChangeDispatcher = function(dispatcher) {
+  // Remove any previous listener.
+  if (this.emulatorConfigChangeEventDispatcher_) {
+    goog.events.unlisten(
+      this.emulatorConfigChangeEventDispatcher_,
+      fireauth.constants.AuthEventType.EMULATOR_CONFIG_CHANGED,
+      this.onEmulatorConfigChanged_);
+  }
+  // Update current dispatcher.
+  this.emulatorConfigChangeEventDispatcher_ = dispatcher;
+  // Using an event listener makes it easy for non-currentUsers to detect
+  // emulator changes on the parent Auth instance. A developer could still
+  // call APIs that require emulation on signed out user references.
+  if (dispatcher) {
+    goog.events.listen(
+      dispatcher, fireauth.constants.AuthEventType.EMULATOR_CONFIG_CHANGED,
+      this.onEmulatorConfigChanged_);
+  }
+}
 
 
 /**
@@ -454,7 +527,7 @@ fireauth.AuthUser.prototype.initializeProactiveRefreshUtility_ = function() {
       function() {
         // Get time until expiration minus the refresh offset.
         var waitInterval =
-            self.stsTokenManager_.getExpirationTime() - goog.now() -
+            self.stsTokenManager_.getExpirationTime() - Date.now() -
             fireauth.TokenRefreshTime.OFFSET_DURATION;
         // Set to zero if wait interval is negative.
         return waitInterval > 0 ? waitInterval : 0;
@@ -1043,7 +1116,7 @@ fireauth.AuthUser.prototype.notifyUserInvalidatedListeners_ = function() {
  * @return {!goog.Promise<undefined>}
  * @private
  */
-fireauth.AuthUser.prototype.setUserAccountInfoFromToken_ = function(idToken) {
+fireauth.AuthUser.prototype.setUserAccountInfoFromToken_ = function (idToken) {
   return this.rpcHandler_.getAccountInfoByIdToken(idToken)
       .then(goog.bind(this.parseAccountInfo_, this));
 };
@@ -1769,7 +1842,8 @@ fireauth.AuthUser.prototype.runOperationWithPopup_ =
             firebase.SDK_VERSION || null,
             null,
             null,
-            this['tenantId']);
+            this['tenantId'],
+            this.emulatorConfig_);
   }
   // The popup must have a name, otherwise when successive popups are triggered
   // they will all render in the same instance and none will succeed since the
@@ -2176,6 +2250,8 @@ fireauth.AuthUser.prototype.destroy = function() {
   }
   // Stop listening to language code changes.
   this.setLanguageCodeChangeDispatcher(null);
+  // Stop listening to emulator config changes.
+  this.setEmulatorConfigChangeDispatcher(null);
   // Stop listening to framework changes.
   this.setFrameworkChangeDispatcher(null);
   // Empty pending promises array.
@@ -2366,7 +2442,8 @@ fireauth.AuthUser.fromPlainObject = function(user) {
   var options = {
     'apiKey': user['apiKey'],
     'authDomain': user['authDomain'],
-    'appName': user['appName']
+    'appName': user['appName'],
+    'emulatorConfig': user['emulatorConfig']
   };
   // Convert to server response format. Constructor does not take
   // stsTokenManager toPlainObject as that format is different than the return
@@ -2379,6 +2456,12 @@ fireauth.AuthUser.fromPlainObject = function(user) {
     // Refresh token could be expired.
     stsTokenManagerResponse[fireauth.RpcHandler.AuthServerField.REFRESH_TOKEN] =
         user['stsTokenManager']['refreshToken'] || null;
+    const expirationTime = user['stsTokenManager']['expirationTime'];
+    if (expirationTime) {
+      stsTokenManagerResponse[fireauth.RpcHandler.AuthServerField
+                                  .EXPIRES_IN] =
+          (expirationTime - Date.now()) / 1000;
+    }
   } else {
     // Token response is a required field.
     return null;

@@ -17,7 +17,6 @@
 
 import { FirebaseNamespace } from '@firebase/app-types';
 import {
-  _FirebaseApp,
   _FirebaseNamespace,
   FirebaseServiceNamespace,
   FirebaseService
@@ -49,7 +48,9 @@ export function createFirebaseNamespaceLite(): FirebaseNamespace {
       component.name !== 'performance' &&
       component.name !== 'installations'
     ) {
-      throw Error(`${name} cannot register with the standalone perf instance`);
+      throw Error(
+        `${component.name} cannot register with the standalone perf instance`
+      );
     }
 
     return registerComponent(component);

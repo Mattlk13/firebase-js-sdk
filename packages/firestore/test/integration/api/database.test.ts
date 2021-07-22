@@ -15,33 +15,32 @@
  * limitations under the License.
  */
 
+import * as firestore from '@firebase/firestore-types';
+import { Deferred } from '@firebase/util';
+import { expect, use } from 'chai';
 import * as chaiAsPromised from 'chai-as-promised';
 
-import * as firestore from '@firebase/firestore-types';
-import { expect, use } from 'chai';
-
-import { Deferred } from '@firebase/util';
 import { EventsAccumulator } from '../util/events_accumulator';
 import * as firebaseExport from '../util/firebase_export';
 import {
   apiDescribe,
-  notEqualOp,
-  notInOp,
   withTestCollection,
+  withTestDbsSettings,
   withTestDb,
   withTestDbs,
   withTestDoc,
   withTestDocAndInitialData
 } from '../util/helpers';
-import { DEFAULT_SETTINGS } from '../util/settings';
+import { DEFAULT_SETTINGS, DEFAULT_PROJECT_ID } from '../util/settings';
 
 use(chaiAsPromised);
 
 const newTestFirestore = firebaseExport.newTestFirestore;
-const usesFunctionalApi = firebaseExport.usesFunctionalApi;
 const Timestamp = firebaseExport.Timestamp;
 const FieldPath = firebaseExport.FieldPath;
 const FieldValue = firebaseExport.FieldValue;
+const DocumentReference = firebaseExport.DocumentReference;
+const QueryDocumentSnapshot = firebaseExport.QueryDocumentSnapshot;
 
 const MEMORY_ONLY_BUILD =
   typeof process !== 'undefined' &&
@@ -471,9 +470,6 @@ apiDescribe('Database', (persistence: boolean) => {
           () => Promise.reject('update should have failed.'),
           err => {
             expect(err.message).to.exist;
-            // TODO: Change this to just match "no document to update" once the
-            // backend response is consistent.
-            expect(err.message).to.match(/no (document|entity) to update/i);
             expect(err.code).to.equal('not-found');
           }
         )
@@ -644,14 +640,6 @@ apiDescribe('Database', (persistence: boolean) => {
       });
     });
 
-    it('inequality and NOT_IN on different fields works', () => {
-      return withTestCollection(persistence, {}, async coll => {
-        expect(() =>
-          coll.where('x', '>=', 32).where('y', notInOp, [1, 2])
-        ).not.to.throw();
-      });
-    });
-
     it('inequality and array-contains-any on different fields works', () => {
       return withTestCollection(persistence, {}, async coll => {
         expect(() =>
@@ -669,12 +657,8 @@ apiDescribe('Database', (persistence: boolean) => {
 
     it('!= same as orderBy works.', () => {
       return withTestCollection(persistence, {}, async coll => {
-        expect(() =>
-          coll.where('x', notEqualOp, 32).orderBy('x')
-        ).not.to.throw();
-        expect(() =>
-          coll.orderBy('x').where('x', notEqualOp, 32)
-        ).not.to.throw();
+        expect(() => coll.where('x', '!=', 32).orderBy('x')).not.to.throw();
+        expect(() => coll.orderBy('x').where('x', '!=', 32)).not.to.throw();
       });
     });
 
@@ -692,10 +676,10 @@ apiDescribe('Database', (persistence: boolean) => {
     it('!= same as first orderBy works.', () => {
       return withTestCollection(persistence, {}, async coll => {
         expect(() =>
-          coll.where('x', notEqualOp, 32).orderBy('x').orderBy('y')
+          coll.where('x', '!=', 32).orderBy('x').orderBy('y')
         ).not.to.throw();
         expect(() =>
-          coll.orderBy('x').where('x', notEqualOp, 32).orderBy('y')
+          coll.orderBy('x').where('x', '!=', 32).orderBy('y')
         ).not.to.throw();
       });
     });
@@ -717,14 +701,6 @@ apiDescribe('Database', (persistence: boolean) => {
     it('IN different than orderBy works', () => {
       return withTestCollection(persistence, {}, async coll => {
         expect(() => coll.orderBy('x').where('y', 'in', [1, 2])).not.to.throw();
-      });
-    });
-
-    it('NOT_IN different than orderBy works', () => {
-      return withTestCollection(persistence, {}, async coll => {
-        expect(() =>
-          coll.orderBy('x').where('y', notInOp, [1, 2])
-        ).not.to.throw();
       });
     });
 
@@ -1068,6 +1044,37 @@ apiDescribe('Database', (persistence: boolean) => {
     });
   });
 
+  // eslint-disable-next-line no-restricted-properties
+  (persistence ? it : it.skip)('offline writes are sent after restart', () => {
+    return withTestDoc(persistence, async docRef => {
+      const firestore = docRef.firestore;
+
+      const app = firestore.app;
+      const name = app.name;
+      const options = app.options;
+
+      await firestore.disableNetwork();
+
+      // We are merely adding to the cache.
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises
+      docRef.set({ foo: 'bar' });
+
+      await app.delete();
+
+      const firestore2 = newTestFirestore(
+        options.projectId,
+        name,
+        DEFAULT_SETTINGS
+      );
+      await firestore2.enablePersistence();
+      await firestore2.waitForPendingWrites();
+      const doc = await firestore2.doc(docRef.path).get();
+
+      expect(doc.exists).to.be.true;
+      expect(doc.metadata.hasPendingWrites).to.be.false;
+    });
+  });
+
   it('rejects subsequent method calls after terminate() is called', async () => {
     return withTestDb(persistence, db => {
       return db.INTERNAL.delete().then(() => {
@@ -1188,15 +1195,7 @@ apiDescribe('Database', (persistence: boolean) => {
         const expectedError =
           'Persistence can only be cleared before a Firestore instance is ' +
           'initialized or after it is terminated.';
-        if (usesFunctionalApi()) {
-          // The modular API throws an exception rather than rejecting the
-          // Promise, which matches our overall handling of API call violations.
-          expect(() => firestore.clearPersistence()).to.throw(expectedError);
-        } else {
-          await expect(
-            firestore.clearPersistence()
-          ).to.eventually.be.rejectedWith(expectedError);
-        }
+        expect(() => firestore.clearPersistence()).to.throw(expectedError);
       });
     }
   );
@@ -1326,7 +1325,11 @@ apiDescribe('Database', (persistence: boolean) => {
   // only to web.
   apiDescribe('withConverter() support', (persistence: boolean) => {
     class Post {
-      constructor(readonly title: string, readonly author: string) {}
+      constructor(
+        readonly title: string,
+        readonly author: string,
+        readonly ref: firestore.DocumentReference | null = null
+      ) {}
       byline(): string {
         return this.title + ', by ' + this.author;
       }
@@ -1340,8 +1343,9 @@ apiDescribe('Database', (persistence: boolean) => {
         snapshot: firestore.QueryDocumentSnapshot,
         options: firestore.SnapshotOptions
       ): Post {
+        expect(snapshot).to.be.an.instanceof(QueryDocumentSnapshot);
         const data = snapshot.data(options);
-        return new Post(data.title, data.author);
+        return new Post(data.title, data.author, snapshot.ref);
       }
     };
 
@@ -1369,7 +1373,7 @@ apiDescribe('Database', (persistence: boolean) => {
         options: firestore.SnapshotOptions
       ): Post {
         const data = snapshot.data();
-        return new Post(data.title, data.author);
+        return new Post(data.title, data.author, snapshot.ref);
       }
     };
 
@@ -1388,6 +1392,18 @@ apiDescribe('Database', (persistence: boolean) => {
       });
     });
 
+    it('for DocumentReference.withConverter(null) ', () => {
+      return withTestDb(persistence, async db => {
+        const docRef = db
+          .collection('posts')
+          .doc()
+          .withConverter(postConverter)
+          .withConverter(null);
+
+        expect(() => docRef.set(new Post('post', 'author'))).to.throw();
+      });
+    });
+
     it('for CollectionReference.withConverter()', () => {
       return withTestDb(persistence, async db => {
         const coll = db.collection('posts').withConverter(postConverter);
@@ -1397,6 +1413,17 @@ apiDescribe('Database', (persistence: boolean) => {
         const post = postData.data();
         expect(post).to.not.equal(undefined);
         expect(post!.byline()).to.equal('post, by author');
+      });
+    });
+
+    it('for CollectionReference.withConverter(null)', () => {
+      return withTestDb(persistence, async db => {
+        const coll = db
+          .collection('posts')
+          .withConverter(postConverter)
+          .withConverter(null);
+
+        expect(() => coll.add(new Post('post', 'author'))).to.throw();
       });
     });
 
@@ -1414,6 +1441,20 @@ apiDescribe('Database', (persistence: boolean) => {
           .get();
         expect(posts.size).to.equal(2);
         expect(posts.docs[0].data()!.byline()).to.equal('post1, by author1');
+      });
+    });
+
+    it('for Query.withConverter(null)', () => {
+      return withTestDb(persistence, async db => {
+        await db
+          .doc('postings/post1')
+          .set({ title: 'post1', author: 'author1' });
+        const posts = await db
+          .collectionGroup('postings')
+          .withConverter(postConverter)
+          .withConverter(null)
+          .get();
+        expect(posts.docs[0].data()).to.not.be.an.instanceof(Post);
       });
     });
 
@@ -1552,7 +1593,7 @@ apiDescribe('Database', (persistence: boolean) => {
             expect(options).to.deep.equal({ serverTimestamps: 'estimate' });
 
             const data = snapshot.data(options);
-            return new Post(data.title, data.author);
+            return new Post(data.title, data.author, snapshot.ref);
           }
         });
 
@@ -1590,5 +1631,78 @@ apiDescribe('Database', (persistence: boolean) => {
         expect(docRef.isEqual(docRef2)).to.be.false;
       });
     });
+
+    it('Correct snapshot specified to fromFirestore() when registered with DocumentReference', () => {
+      return withTestDb(persistence, async db => {
+        const untypedDocRef = db.collection('/models').doc();
+        const docRef = untypedDocRef.withConverter(postConverter);
+        await docRef.set(new Post('post', 'author'));
+        const docSnapshot = await docRef.get();
+        const ref = docSnapshot.data()!.ref!;
+        expect(ref).to.be.an.instanceof(DocumentReference);
+        expect(untypedDocRef.isEqual(ref)).to.be.true;
+      });
+    });
+
+    it('Correct snapshot specified to fromFirestore() when registered with CollectionReference', () => {
+      return withTestDb(persistence, async db => {
+        const untypedCollection = db
+          .collection('/models')
+          .doc()
+          .collection('sub');
+        const collection = untypedCollection.withConverter(postConverter);
+        const docRef = collection.doc();
+        await docRef.set(new Post('post', 'author', docRef));
+        const querySnapshot = await collection.get();
+        expect(querySnapshot.size).to.equal(1);
+        const ref = querySnapshot.docs[0].data().ref!;
+        expect(ref).to.be.an.instanceof(DocumentReference);
+        const untypedDocRef = untypedCollection.doc(docRef.id);
+        expect(untypedDocRef.isEqual(ref)).to.be.true;
+      });
+    });
+
+    it('Correct snapshot specified to fromFirestore() when registered with Query', () => {
+      return withTestDb(persistence, async db => {
+        const untypedCollection = db.collection('/models');
+        const untypedDocRef = untypedCollection.doc();
+        const docRef = untypedDocRef.withConverter(postConverter);
+        await docRef.set(new Post('post', 'author', docRef));
+        const query = untypedCollection
+          .where(FieldPath.documentId(), '==', docRef.id)
+          .withConverter(postConverter);
+        const querySnapshot = await query.get();
+        expect(querySnapshot.size).to.equal(1);
+        const ref = querySnapshot.docs[0].data().ref!;
+        expect(ref).to.be.an.instanceof(DocumentReference);
+        expect(untypedDocRef.isEqual(ref)).to.be.true;
+      });
+    });
+  });
+
+  it('can set and get data with auto detect long polling enabled', () => {
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      experimentalAutoDetectLongPolling: true
+    };
+
+    return withTestDbsSettings(
+      persistence,
+      DEFAULT_PROJECT_ID,
+      settings,
+      1,
+      async ([db]) => {
+        const data = { name: 'Rafi', email: 'abc@xyz.com' };
+        const doc = await db.collection('users').doc();
+
+        return doc
+          .set(data)
+          .then(() => doc.get())
+          .then(snapshot => {
+            expect(snapshot.exists).to.be.ok;
+            expect(snapshot.data()).to.deep.equal(data);
+          });
+      }
+    );
   });
 });

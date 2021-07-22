@@ -15,23 +15,24 @@
  * limitations under the License.
  */
 
-import { Deferred } from '../util/promise';
-import { TimerId, AsyncQueue } from '../util/async_queue';
 import { ExponentialBackoff } from '../remote/backoff';
-import { Transaction } from './transaction';
 import { Datastore } from '../remote/datastore';
-import { isNullOrUndefined } from '../util/types';
 import { isPermanentError } from '../remote/rpc_error';
+import { AsyncQueue, TimerId } from '../util/async_queue';
 import { FirestoreError } from '../util/error';
+import { Deferred } from '../util/promise';
+import { isNullOrUndefined } from '../util/types';
 
-const RETRY_COUNT = 5;
+import { Transaction } from './transaction';
+
+export const DEFAULT_MAX_ATTEMPTS_COUNT = 5;
 
 /**
  * TransactionRunner encapsulates the logic needed to run and retry transactions
  * with backoff.
  */
 export class TransactionRunner<T> {
-  private retries = RETRY_COUNT;
+  private attemptsRemaining = DEFAULT_MAX_ATTEMPTS_COUNT;
   private backoff: ExponentialBackoff;
 
   constructor(
@@ -48,6 +49,7 @@ export class TransactionRunner<T> {
 
   /** Runs the transaction and sets the result on deferred. */
   run(): void {
+    this.attemptsRemaining -= 1;
     this.runWithBackOff();
   }
 
@@ -98,8 +100,8 @@ export class TransactionRunner<T> {
   }
 
   private handleTransactionError(error: Error): void {
-    if (this.retries > 0 && this.isRetryableTransactionError(error)) {
-      this.retries -= 1;
+    if (this.attemptsRemaining > 0 && this.isRetryableTransactionError(error)) {
+      this.attemptsRemaining -= 1;
       this.asyncQueue.enqueueAndForget(() => {
         this.runWithBackOff();
         return Promise.resolve();

@@ -16,8 +16,9 @@
  */
 
 import { expect } from 'chai';
-import { Code } from '../../../src/util/error';
+
 import { Timestamp } from '../../../src/api/timestamp';
+import { Code } from '../../../src/util/error';
 import { addEqualityMatcher } from '../../util/equality_matcher';
 
 describe('Timestamp', () => {
@@ -131,6 +132,12 @@ describe('Timestamp', () => {
     expect(t1 <= t2).to.be.true;
     expect(t1 > t2).to.be.false;
     expect(t1 >= t2).to.be.false;
+  });
+
+  it('handles decimal inputs in fromMillis()', () => {
+    const actual = Timestamp.fromMillis(1000.1);
+    const expected = new Timestamp(1, 100000);
+    expect(actual.isEqual(expected)).to.be.true;
   });
 
   it('serializes to JSON', () => {

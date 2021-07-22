@@ -15,6 +15,14 @@
  * limitations under the License.
  */
 
+import * as api from '../../src/protos/firestore_proto_api';
+import { mapRpcCodeFromCode } from '../../src/remote/rpc_error';
+import {
+  JsonProtoSerializer,
+  toBytes,
+  toName,
+  toVersion
+} from '../../src/remote/serializer';
 import {
   DocumentWatchChange,
   ExistenceFilterChange,
@@ -22,16 +30,7 @@ import {
   WatchTargetChange,
   WatchTargetChangeState
 } from '../../src/remote/watch_change';
-import * as api from '../../src/protos/firestore_proto_api';
-import { Document, NoDocument } from '../../src/model/document';
-import { mapRpcCodeFromCode } from '../../src/remote/rpc_error';
 import { fail } from '../../src/util/assert';
-import {
-  JsonProtoSerializer,
-  toBytes,
-  toName,
-  toVersion
-} from '../../src/remote/serializer';
 import { TEST_DATABASE_ID } from '../unit/local/persistence_test_helpers';
 
 const serializer = new JsonProtoSerializer(
@@ -51,20 +50,20 @@ export function encodeWatchChange(
     };
   }
   if (watchChange instanceof DocumentWatchChange) {
-    if (watchChange.newDoc instanceof Document) {
+    if (watchChange.newDoc?.isFoundDocument()) {
       const doc = watchChange.newDoc;
       return {
         documentChange: {
           document: {
             name: toName(serializer, doc.key),
-            fields: doc.toProto().mapValue.fields,
+            fields: doc?.data.value.mapValue.fields,
             updateTime: toVersion(serializer, doc.version)
           },
           targetIds: watchChange.updatedTargetIds,
           removedTargetIds: watchChange.removedTargetIds
         }
       };
-    } else if (watchChange.newDoc instanceof NoDocument) {
+    } else if (watchChange.newDoc?.isNoDocument()) {
       const doc = watchChange.newDoc;
       return {
         documentDelete: {

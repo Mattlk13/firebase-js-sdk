@@ -22,8 +22,10 @@ import {
   ServiceError
 } from '@grpc/grpc-js';
 import { version as grpcVersion } from '@grpc/grpc-js/package.json';
+
 import { Token } from '../../api/credentials';
 import { DatabaseInfo } from '../../core/database_info';
+import { SDK_VERSION } from '../../core/version';
 import { Connection, Stream } from '../../remote/connection';
 import { mapCodeFromRpcCode } from '../../remote/rpc_error';
 import { StreamBridge } from '../../remote/stream_bridge';
@@ -32,12 +34,15 @@ import { FirestoreError } from '../../util/error';
 import { logError, logDebug, logWarn } from '../../util/log';
 import { NodeCallback, nodePromise } from '../../util/node_api';
 import { Deferred } from '../../util/promise';
-import { SDK_VERSION } from '../../core/version';
 
 const LOG_TAG = 'Connection';
 const X_GOOG_API_CLIENT_VALUE = `gl-node/${process.versions.node} fire/${SDK_VERSION} grpc/${grpcVersion}`;
 
-function createMetadata(databasePath: string, token: Token | null): Metadata {
+function createMetadata(
+  databasePath: string,
+  token: Token | null,
+  appId: string
+): Metadata {
   hardAssert(
     token === null || token.type === 'OAuth',
     'If provided, token must be OAuth'
@@ -51,10 +56,13 @@ function createMetadata(databasePath: string, token: Token | null): Metadata {
       }
     }
   }
-  metadata.set('x-goog-api-client', X_GOOG_API_CLIENT_VALUE);
+  if (appId) {
+    metadata.set('X-Firebase-GMPID', appId);
+  }
+  metadata.set('X-Goog-Api-Client', X_GOOG_API_CLIENT_VALUE);
   // This header is used to improve routing and project isolation by the
   // backend.
-  metadata.set('google-cloud-resource-prefix', databasePath);
+  metadata.set('Google-Cloud-Resource-Prefix', databasePath);
   return metadata;
 }
 
@@ -101,7 +109,11 @@ export class GrpcConnection implements Connection {
     token: Token | null
   ): Promise<Resp> {
     const stub = this.ensureActiveStub();
-    const metadata = createMetadata(this.databasePath, token);
+    const metadata = createMetadata(
+      this.databasePath,
+      token,
+      this.databaseInfo.appId
+    );
     const jsonRequest = { database: this.databasePath, ...request };
 
     return nodePromise((callback: NodeCallback<Resp>) => {
@@ -146,7 +158,11 @@ export class GrpcConnection implements Connection {
       request
     );
     const stub = this.ensureActiveStub();
-    const metadata = createMetadata(this.databasePath, token);
+    const metadata = createMetadata(
+      this.databasePath,
+      token,
+      this.databaseInfo.appId
+    );
     const jsonRequest = { ...request, database: this.databasePath };
     const stream = stub[rpcName](jsonRequest, metadata);
     stream.on('data', (response: Resp) => {
@@ -172,7 +188,11 @@ export class GrpcConnection implements Connection {
     token: Token | null
   ): Stream<Req, Resp> {
     const stub = this.ensureActiveStub();
-    const metadata = createMetadata(this.databasePath, token);
+    const metadata = createMetadata(
+      this.databasePath,
+      token,
+      this.databaseInfo.appId
+    );
     const grpcStream = stub[rpcName](metadata);
 
     let closed = false;
