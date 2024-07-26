@@ -33,11 +33,11 @@ export {
   basicUniqueFuncFar,
   basicVarDeclarationExportFar,
   basicVarStatementExportFar,
-  reExportVarStatmentExportFar
+  reExportVarStatementExportFar
 } from './far';
 export let basicVarDeclarationExport: string;
 export const basicVarStatementExport = 'basicVarStatementExport';
-export const reExportVarStatmentExport = LogLevel1;
+export const reExportVarStatementExport = LogLevel1;
 
 export enum BasicEnumExport {
   DEBUG = 0,
@@ -90,7 +90,7 @@ export function basicUniqueFunc(
     return pickedCard;
   }
   // Otherwise just let them pick the card
-  else if (typeof x === 'number') {
+  else {
     return { suit: 'a', card: x % 13 };
   }
 }

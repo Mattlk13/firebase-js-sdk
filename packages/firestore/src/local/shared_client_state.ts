@@ -29,17 +29,15 @@ import { hardAssert, debugAssert } from '../util/assert';
 import { AsyncQueue } from '../util/async_queue';
 import { Code, FirestoreError } from '../util/error';
 import { logError, logDebug } from '../util/log';
-import { SortedSet } from '../util/sorted_set';
-import { SortedMap } from '../util/sorted_map';
 import { primitiveComparator } from '../util/misc';
+import { SortedMap } from '../util/sorted_map';
+import { SortedSet } from '../util/sorted_set';
 import { isSafeInteger, WindowLike } from '../util/types';
-import {
-  QueryTargetState,
-  SharedClientStateSyncer
-} from './shared_client_state_syncer';
+
 import {
   CLIENT_STATE_KEY_PREFIX,
   ClientStateSchema,
+  createBundleLoadedKey,
   createWebStorageClientStateKey,
   createWebStorageMutationBatchKey,
   createWebStorageOnlineStateKey,
@@ -51,6 +49,10 @@ import {
   QueryTargetStateSchema,
   SharedOnlineStateSchema
 } from './shared_client_state_schema';
+import {
+  QueryTargetState,
+  SharedClientStateSyncer
+} from './shared_client_state_syncer';
 
 const LOG_TAG = 'SharedClientState';
 
@@ -172,6 +174,14 @@ export interface SharedClientState {
   setOnlineState(onlineState: OnlineState): void;
 
   writeSequenceNumber(sequenceNumber: ListenSequenceNumber): void;
+
+  /**
+   * Notifies other clients when remote documents have changed due to loading
+   * a bundle.
+   *
+   * @param collectionGroups The collection groups affected by this bundle.
+   */
+  notifyBundleLoaded(collectionGroups: Set<string>): void;
 }
 
 /**
@@ -339,7 +349,7 @@ export class QueryTargetMetadata {
 
 /**
  * Metadata state of a single client denoting the query targets it is actively
- * listening to.
+ * listening to the watch.
  */
 // Visible for testing.
 export interface ClientState {
@@ -476,6 +486,7 @@ export class WebStorageSharedClientState implements SharedClientState {
   private readonly sequenceNumberKey: string;
   private readonly storageListener = this.handleWebStorageEvent.bind(this);
   private readonly onlineStateKey: string;
+  private readonly bundleLoadedKey: string;
   private readonly clientStateKeyRe: RegExp;
   private readonly mutationBatchKeyRe: RegExp;
   private readonly queryTargetKeyRe: RegExp;
@@ -530,6 +541,8 @@ export class WebStorageSharedClientState implements SharedClientState {
     );
 
     this.onlineStateKey = createWebStorageOnlineStateKey(this.persistenceKey);
+
+    this.bundleLoadedKey = createBundleLoadedKey(this.persistenceKey);
 
     // Rather than adding the storage observer during start(), we add the
     // storage observer during initialization. This ensures that we collect
@@ -602,7 +615,7 @@ export class WebStorageSharedClientState implements SharedClientState {
 
     // Register a window unload hook to remove the client metadata entry from
     // WebStorage even if `shutdown()` was not called.
-    this.window.addEventListener('unload', () => this.shutdown());
+    this.window.addEventListener('pagehide', () => this.shutdown());
 
     this.started = true;
   }
@@ -708,6 +721,10 @@ export class WebStorageSharedClientState implements SharedClientState {
 
   setOnlineState(onlineState: OnlineState): void {
     this.persistOnlineState(onlineState);
+  }
+
+  notifyBundleLoaded(collectionGroups: Set<string>): void {
+    this.persistBundleLoadedState(collectionGroups);
   }
 
   shutdown(): void {
@@ -817,6 +834,15 @@ export class WebStorageSharedClientState implements SharedClientState {
           if (sequenceNumber !== ListenSequence.INVALID) {
             this.sequenceNumberHandler!(sequenceNumber);
           }
+        } else if (storageEvent.key === this.bundleLoadedKey) {
+          const collectionGroups = this.fromWebStoreBundleLoadedState(
+            storageEvent.newValue!
+          );
+          await Promise.all(
+            collectionGroups.map(cg =>
+              this.syncEngine!.synchronizeWithChangedDocuments(cg)
+            )
+          );
         }
       });
     }
@@ -882,6 +908,11 @@ export class WebStorageSharedClientState implements SharedClientState {
     this.setItem(targetKey, targetMetadata.toWebStorageJSON());
   }
 
+  private persistBundleLoadedState(collectionGroups: Set<string>): void {
+    const json = JSON.stringify(Array.from(collectionGroups));
+    this.setItem(this.bundleLoadedKey, json);
+  }
+
   /**
    * Parses a client state key in WebStorage. Returns null if the key does not
    * match the expected key format.
@@ -945,6 +976,10 @@ export class WebStorageSharedClientState implements SharedClientState {
    */
   private fromWebStorageOnlineState(value: string): SharedOnlineState | null {
     return SharedOnlineState.fromWebStorageEntry(value);
+  }
+
+  private fromWebStoreBundleLoadedState(value: string): string[] {
+    return JSON.parse(value) as string[];
   }
 
   private async handleMutationBatchEvent(
@@ -1128,4 +1163,8 @@ export class MemorySharedClientState implements SharedClientState {
   shutdown(): void {}
 
   writeSequenceNumber(sequenceNumber: ListenSequenceNumber): void {}
+
+  notifyBundleLoaded(collectionGroups: Set<string>): void {
+    // No op.
+  }
 }

@@ -18,20 +18,35 @@
 module.exports = {
   extends: '../../config/.eslintrc.js',
   parserOptions: {
-    project: 'tsconfig.json',
+    project: 'tsconfig.eslint.json',
     // to make vscode-eslint work with monorepo
     // https://github.com/typescript-eslint/typescript-eslint/issues/251#issuecomment-463943250
     tsconfigRootDir: __dirname
   },
   plugins: ['import'],
+  ignorePatterns: ['compat/*'],
   rules: {
     'no-console': ['error', { allow: ['warn', 'error'] }],
-    'import/no-default-export': 'error',
     '@typescript-eslint/no-unused-vars': [
       'error',
       {
         varsIgnorePattern: '^_',
         args: 'none'
+      }
+    ],
+    'import/order': [
+      'error',
+      {
+        'groups': [
+          'builtin',
+          'external',
+          'internal',
+          'parent',
+          'sibling',
+          'index'
+        ],
+        'newlines-between': 'always',
+        'alphabetize': { 'order': 'asc', 'caseInsensitive': true }
       }
     ],
     'no-restricted-globals': [
@@ -48,6 +63,15 @@ module.exports = {
   },
   overrides: [
     {
+      files: ['**/*.d.ts'],
+      rules: {
+        'camelcase': 'off',
+        'import/no-duplicates': 'off',
+        '@typescript-eslint/no-explicit-any': 'off',
+        '@typescript-eslint/no-unused-vars': 'off'
+      }
+    },
+    {
       files: ['**/*.test.ts', '**/test/**/*.ts'],
       rules: {
         '@typescript-eslint/no-explicit-any': 'error'
@@ -58,20 +82,6 @@ module.exports = {
       rules: {
         'import/no-extraneous-dependencies': 'off',
         '@typescript-eslint/no-require-imports': 'off'
-      }
-    },
-    // TODO(firestorelite): Remove this exception when app-exp is published
-    {
-      files: ['lite/**/*.ts'],
-      rules: {
-        'import/no-extraneous-dependencies': 'off'
-      }
-    },
-    // TODO(firestoreexp): Remove this exception when app-exp is published
-    {
-      files: ['exp/**/*.ts'],
-      rules: {
-        'import/no-extraneous-dependencies': 'off'
       }
     }
   ]

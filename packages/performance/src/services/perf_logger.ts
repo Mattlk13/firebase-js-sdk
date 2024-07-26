@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2019 Google LLC
+ * Copyright 2020 Google LLC
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,6 +32,8 @@ import {
 } from './initialization_service';
 import { transportHandler } from './transport_service';
 import { SDK_VERSION } from '../constants';
+import { FirebaseApp } from '@firebase/app';
+import { getAppId } from '../utils/app_utils';
 
 const enum ResourceType {
   NetworkRequest,
@@ -83,8 +85,6 @@ interface TraceMetric {
   custom_attributes?: { [key: string]: string };
 }
 
-/* eslint-enble camelcase */
-
 let logger: (
   resource: NetworkRequest | Trace,
   resourceType: ResourceType
@@ -120,19 +120,12 @@ export function logTrace(trace: Trace): void {
     return;
   }
 
-  if (
-    !settingsService.loggingEnabled ||
-    !settingsService.logTraceAfterSampling
-  ) {
-    return;
-  }
-
   if (isPerfInitialized()) {
     sendTraceLog(trace);
   } else {
     // Custom traces can be used before the initialization but logging
     // should wait until after.
-    getInitializationPromise().then(
+    getInitializationPromise(trace.performanceController).then(
       () => sendTraceLog(trace),
       () => sendTraceLog(trace)
     );
@@ -140,9 +133,19 @@ export function logTrace(trace: Trace): void {
 }
 
 function sendTraceLog(trace: Trace): void {
-  if (getIid()) {
-    setTimeout(() => sendLog(trace, ResourceType.Trace), 0);
+  if (!getIid()) {
+    return;
   }
+
+  const settingsService = SettingsService.getInstance();
+  if (
+    !settingsService.loggingEnabled ||
+    !settingsService.logTraceAfterSampling
+  ) {
+    return;
+  }
+
+  setTimeout(() => sendLog(trace, ResourceType.Trace), 0);
 }
 
 export function logNetworkRequest(networkRequest: NetworkRequest): void {
@@ -198,7 +201,9 @@ function serializeNetworkRequest(networkRequest: NetworkRequest): string {
     time_to_response_completed_us: networkRequest.timeToResponseCompletedUs
   };
   const perfMetric: PerfNetworkLog = {
-    application_info: getApplicationInfo(),
+    application_info: getApplicationInfo(
+      networkRequest.performanceController.app
+    ),
     network_request_metric: networkRequestMetric
   };
   return JSON.stringify(perfMetric);
@@ -221,15 +226,15 @@ function serializeTrace(trace: Trace): string {
   }
 
   const perfMetric: PerfTraceLog = {
-    application_info: getApplicationInfo(),
+    application_info: getApplicationInfo(trace.performanceController.app),
     trace_metric: traceMetric
   };
   return JSON.stringify(perfMetric);
 }
 
-function getApplicationInfo(): ApplicationInfo {
+function getApplicationInfo(firebaseApp: FirebaseApp): ApplicationInfo {
   return {
-    google_app_id: SettingsService.getInstance().getAppId(),
+    google_app_id: getAppId(firebaseApp),
     app_instance_id: getIid(),
     web_app_info: {
       sdk_version: SDK_VERSION,
@@ -241,3 +246,5 @@ function getApplicationInfo(): ApplicationInfo {
     application_process_state: 0
   };
 }
+
+/* eslint-enable camelcase */

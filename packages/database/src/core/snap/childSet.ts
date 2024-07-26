@@ -21,17 +21,11 @@ import { NamedNode } from './Node';
 
 const LOG_2 = Math.log(2);
 
-/**
- * @constructor
- */
 class Base12Num {
   count: number;
   private current_: number;
   private bits_: number;
 
-  /**
-   * @param {number} length
-   */
   constructor(length: number) {
     const logBase2 = (num: number) =>
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -43,9 +37,6 @@ class Base12Num {
     this.bits_ = (length + 1) & mask;
   }
 
-  /**
-   * @return {boolean}
-   */
   nextBitIsOne(): boolean {
     //noinspection JSBitwiseOperatorUsage
     const result = !(this.bits_ & (0x1 << this.current_));
@@ -61,13 +52,11 @@ class Base12Num {
  * Uses the algorithm described in the paper linked here:
  * http://citeseerx.ist.psu.edu/viewdoc/summary?doi=10.1.1.46.1458
  *
- * @template K, V
- * @param {Array.<!NamedNode>} childList Unsorted list of children
- * @param {function(!NamedNode, !NamedNode):number} cmp The comparison method to be used
- * @param {(function(NamedNode):K)=} keyFn An optional function to extract K from a node wrapper, if K's
- *                                                        type is not NamedNode
- * @param {(function(K, K):number)=} mapSortFn An optional override for comparator used by the generated sorted map
- * @return {SortedMap.<K, V>}
+ * @param childList - Unsorted list of children
+ * @param cmp - The comparison method to be used
+ * @param keyFn - An optional function to extract K from a node wrapper, if K's
+ * type is not NamedNode
+ * @param mapSortFn - An optional override for comparator used by the generated sorted map
  */
 export const buildChildSet = function <K, V>(
   childList: NamedNode[],
@@ -88,10 +77,10 @@ export const buildChildSet = function <K, V>(
       return null;
     } else if (length === 1) {
       namedNode = childList[low];
-      key = keyFn ? keyFn(namedNode) : ((namedNode as unknown) as K);
+      key = keyFn ? keyFn(namedNode) : (namedNode as unknown as K);
       return new LLRBNode(
         key,
-        (namedNode.node as unknown) as V,
+        namedNode.node as unknown as V,
         LLRBNode.BLACK,
         null,
         null
@@ -102,10 +91,10 @@ export const buildChildSet = function <K, V>(
       const left = buildBalancedTree(low, middle);
       const right = buildBalancedTree(middle + 1, high);
       namedNode = childList[middle];
-      key = keyFn ? keyFn(namedNode) : ((namedNode as unknown) as K);
+      key = keyFn ? keyFn(namedNode) : (namedNode as unknown as K);
       return new LLRBNode(
         key,
-        (namedNode.node as unknown) as V,
+        namedNode.node as unknown as V,
         LLRBNode.BLACK,
         left,
         right
@@ -124,11 +113,11 @@ export const buildChildSet = function <K, V>(
       index -= chunkSize;
       const childTree = buildBalancedTree(low + 1, high);
       const namedNode = childList[low];
-      const key: K = keyFn ? keyFn(namedNode) : ((namedNode as unknown) as K);
+      const key: K = keyFn ? keyFn(namedNode) : (namedNode as unknown as K);
       attachPennant(
         new LLRBNode(
           key,
-          (namedNode.node as unknown) as V,
+          namedNode.node as unknown as V,
           color,
           null,
           childTree

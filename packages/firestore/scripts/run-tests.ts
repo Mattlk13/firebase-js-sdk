@@ -15,9 +15,10 @@
  * limitations under the License.
  */
 
-import * as yargs from 'yargs';
 import { resolve } from 'path';
+
 import { spawn } from 'child-process-promise';
+import * as yargs from 'yargs';
 
 const argv = yargs.options({
   main: {
@@ -33,14 +34,18 @@ const argv = yargs.options({
   },
   persistence: {
     type: 'boolean'
+  },
+  databaseId: {
+    type: 'string'
   }
-}).argv;
+}).parseSync();
 
 const nyc = resolve(__dirname, '../../../node_modules/.bin/nyc');
 const mocha = resolve(__dirname, '../../../node_modules/.bin/mocha');
+const babel = resolve(__dirname, '../babel-register.js');
 
-process.env.TS_NODE_CACHE = 'NO';
-process.env.TS_NODE_COMPILER_OPTIONS = '{"module":"commonjs"}';
+// used in '../../config/mocharc.node.js' to disable ts-node
+process.env.NO_TS_NODE = "true";
 process.env.TEST_PLATFORM = argv.platform;
 
 let args = [
@@ -48,7 +53,7 @@ let args = [
   'lcovonly',
   mocha,
   '--require',
-  'ts-node/register',
+  babel,
   '--require',
   argv.main,
   '--config',
@@ -56,8 +61,7 @@ let args = [
 ];
 
 if (argv.emulator) {
-  process.env.FIRESTORE_EMULATOR_PORT = '8080';
-  process.env.FIRESTORE_EMULATOR_PROJECT_ID = 'test-emulator';
+  process.env.FIRESTORE_TARGET_BACKEND = 'emulator';
 }
 
 if (argv.persistence) {
@@ -65,7 +69,11 @@ if (argv.persistence) {
   args.push('--require', 'test/util/node_persistence.ts');
 }
 
-args = args.concat(argv._);
+if (argv.databaseId) {
+  process.env.FIRESTORE_TARGET_DB_ID = argv.databaseId;
+}
+
+args = args.concat(argv._ as string[]);
 
 const childProcess = spawn(nyc, args, {
   stdio: 'inherit',

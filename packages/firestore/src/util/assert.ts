@@ -16,6 +16,7 @@
  */
 
 import { SDK_VERSION } from '../core/version';
+
 import { logError } from './log';
 
 /**
@@ -61,6 +62,8 @@ export function hardAssert(
  * The code of callsites invoking this function are stripped out in production
  * builds. Any side-effects of code within the debugAssert() invocation will not
  * happen in this case.
+ *
+ * @internal
  */
 export function debugAssert(
   assertion: boolean,

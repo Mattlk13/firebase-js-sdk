@@ -16,15 +16,17 @@
  */
 
 import { expect } from 'chai';
-import { Stream } from '../../../src/remote/connection';
-import { DatabaseId, DatabaseInfo } from '../../../src/core/database_info';
-import { RestConnection } from '../../../src/remote/rest_connection';
-import { Token } from '../../../src/api/credentials';
-import { StringMap } from '../../../src/util/types';
-import { Code, FirestoreError } from '../../../src/util/error';
+
+import { AppCheckToken, OAuthToken, Token } from '../../../src/api/credentials';
 import { User } from '../../../src/auth/user';
+import { DatabaseId, DatabaseInfo } from '../../../src/core/database_info';
 import { SDK_VERSION } from '../../../src/core/version';
+import { ResourcePath } from '../../../src/model/path';
+import { Stream } from '../../../src/remote/connection';
+import { RestConnection } from '../../../src/remote/rest_connection';
+import { Code, FirestoreError } from '../../../src/util/error';
 import { Indexable } from '../../../src/util/misc';
+import { StringMap } from '../../../src/util/types';
 
 export class TestRestConnection extends RestConnection {
   lastUrl: string = '';
@@ -34,7 +36,8 @@ export class TestRestConnection extends RestConnection {
 
   openStream<Req, Resp>(
     rpcName: string,
-    token: Token | null
+    authToken: Token | null,
+    appCheckToken: Token | null
   ): Stream<Req, Resp> {
     throw new Error('Not Implemented');
   }
@@ -46,7 +49,7 @@ export class TestRestConnection extends RestConnection {
     body: Req
   ): Promise<Resp> {
     this.lastUrl = url;
-    this.lastRequestBody = (body as unknown) as Indexable;
+    this.lastRequestBody = body as unknown as Indexable;
     this.lastHeaders = headers;
     const response = this.nextResponse;
     this.nextResponse = Promise.resolve<unknown>({});
@@ -57,18 +60,25 @@ export class TestRestConnection extends RestConnection {
 describe('RestConnection', () => {
   const testDatabaseInfo = new DatabaseInfo(
     new DatabaseId('testproject'),
+    'test-app-id',
     'persistenceKey',
     'example.com',
     /*ssl=*/ false,
-    /*forceLongPolling=*/ false
+    /*forceLongPolling=*/ false,
+    /*autoDetectLongPolling=*/ false,
+    /*longPollingOptions=*/ {},
+    /*useFetchStreams=*/ false
   );
   const connection = new TestRestConnection(testDatabaseInfo);
 
   it('url uses from path', async () => {
     await connection.invokeRPC(
       'Commit',
-      'projects/testproject/databases/(default)/documents',
+      new ResourcePath(
+        'projects/testproject/databases/(default)/documents'.split('/')
+      ),
       {},
+      null,
       null
     );
     expect(connection.lastUrl).to.equal(
@@ -79,18 +89,41 @@ describe('RestConnection', () => {
   it('merges headers', async () => {
     await connection.invokeRPC(
       'RunQuery',
-      'projects/testproject/databases/(default)/documents/foo',
+      new ResourcePath(
+        'projects/testproject/databases/(default)/documents/foo'.split('/')
+      ),
       {},
-      {
-        user: User.UNAUTHENTICATED,
-        type: 'OAuth',
-        authHeaders: { 'Authorization': 'Bearer owner' }
-      }
+      new OAuthToken('owner', User.UNAUTHENTICATED),
+      new AppCheckToken('some-app-check-token')
     );
     expect(connection.lastHeaders).to.deep.equal({
       'Authorization': 'Bearer owner',
       'Content-Type': 'text/plain',
-      'X-Goog-Api-Client': `gl-js/ fire/${SDK_VERSION}`
+      'X-Firebase-GMPID': 'test-app-id',
+      'X-Goog-Api-Client': `gl-js/ fire/${SDK_VERSION}`,
+      'x-firebase-appcheck': 'some-app-check-token',
+      'x-goog-request-params': 'project_id=testproject',
+      'google-cloud-resource-prefix': 'projects/testproject/databases/(default)'
+    });
+  });
+
+  it('empty app check token is not added to headers', async () => {
+    await connection.invokeRPC(
+      'RunQuery',
+      new ResourcePath(
+        'projects/testproject/databases/(default)/documents/foo'.split('/')
+      ),
+      {},
+      null,
+      new AppCheckToken('')
+    );
+    expect(connection.lastHeaders).to.deep.equal({
+      'Content-Type': 'text/plain',
+      'X-Firebase-GMPID': 'test-app-id',
+      'X-Goog-Api-Client': `gl-js/ fire/${SDK_VERSION}`,
+      'x-goog-request-params': 'project_id=testproject',
+      'google-cloud-resource-prefix': 'projects/testproject/databases/(default)'
+      // Note: AppCheck token should not exist here.
     });
   });
 
@@ -98,8 +131,11 @@ describe('RestConnection', () => {
     connection.nextResponse = Promise.resolve({ response: true });
     const response = await connection.invokeRPC(
       'RunQuery',
-      'projects/testproject/databases/(default)/documents/coll',
+      new ResourcePath(
+        'projects/testproject/databases/(default)/documents/coll'.split('/')
+      ),
       {},
+      null,
       null
     );
     expect(response).to.deep.equal({ response: true });
@@ -111,8 +147,11 @@ describe('RestConnection', () => {
     return expect(
       connection.invokeRPC(
         'RunQuery',
-        'projects/testproject/databases/(default)/documents/coll',
+        new ResourcePath(
+          'projects/testproject/databases/(default)/documents/coll'.split('/')
+        ),
         {},
+        null,
         null
       )
     ).to.be.eventually.rejectedWith(error);

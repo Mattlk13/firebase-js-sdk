@@ -15,14 +15,21 @@
  * limitations under the License.
  */
 
-import { debugAssert } from './assert';
 import { randomBytes } from '../platform/random_bytes';
+
+import { debugAssert } from './assert';
 
 export type EventHandler<E> = (value: E) => void;
 export interface Indexable {
   [k: string]: unknown;
 }
 
+/**
+ * A utility class for generating unique alphanumeric IDs of a specified length.
+ *
+ * @internal
+ * Exported internally for testing purposes.
+ */
 export class AutoId {
   static newId(): string {
     // Alphanumeric characters
@@ -65,6 +72,10 @@ export function primitiveComparator<T>(left: T, right: T): number {
 
 export interface Equatable<T> {
   isEqual(other: T): boolean;
+}
+
+export interface Iterable<V> {
+  forEach: (cb: (v: V) => void) => void;
 }
 
 /** Helper to compare arrays using isEqual(). */

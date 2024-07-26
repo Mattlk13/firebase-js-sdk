@@ -15,12 +15,14 @@
  * limitations under the License.
  */
 
-import { describeSpec, specTest } from './describe_spec';
-import { client, spec } from './spec_builder';
-import { TimerId } from '../../../src/util/async_queue';
 import { newQueryForPath } from '../../../src/core/query';
+import { TargetPurpose } from '../../../src/local/target_data';
+import { TimerId } from '../../../src/util/async_queue';
 import { Code } from '../../../src/util/error';
 import { deletedDoc, doc, filter, query } from '../../util/helpers';
+
+import { describeSpec, specTest } from './describe_spec';
+import { client, spec } from './spec_builder';
 import { RpcError } from './spec_rpc_error';
 
 // The IndexedDB action that the Watch stream uses to detect if IndexedDB access
@@ -136,7 +138,9 @@ describeSpec('Persistence Recovery', ['no-ios', 'no-android'], () => {
           // The primary client 0 receives a notification that the query can
           // be released, but it can only process the change after we recover
           // the database.
-          .expectActiveTargets({ query: query1 })
+          .expectActiveTargets({
+            query: query1
+          })
           .recoverDatabase()
           .runTimer(TimerId.AsyncQueueRetry)
           .expectActiveTargets()
@@ -173,7 +177,7 @@ describeSpec('Persistence Recovery', ['no-ios', 'no-android'], () => {
           .recoverDatabase()
           .runTimer(TimerId.AsyncQueueRetry)
           .expectPrimaryState(true)
-          .expectListen(query1, 'resume-token-1000')
+          .expectListen(query1, { resumeToken: 'resume-token-1000' })
           .watchAcksFull(query1, 2000, docB)
           .expectEvents(query1, { added: [docB] })
       );
@@ -214,7 +218,7 @@ describeSpec('Persistence Recovery', ['no-ios', 'no-android'], () => {
           .recoverDatabase()
           .runTimer(TimerId.AsyncQueueRetry)
           .expectPrimaryState(true)
-          .expectListen(query1, 'resume-token-1000')
+          .expectListen(query1, { resumeToken: 'resume-token-1000' })
           .watchAcksFull(query1, 2000, docB)
           .client(2)
           .expectEvents(query1, { added: [docB] })
@@ -298,19 +302,13 @@ describeSpec('Persistence Recovery', ['no-ios', 'no-android'], () => {
 
   specTest('Does not surface non-persisted writes', [], () => {
     const query1 = query('collection');
-    const doc1Local = doc(
-      'collection/key1',
-      0,
-      { foo: 'a' },
-      { hasLocalMutations: true }
-    );
+    const doc1Local = doc('collection/key1', 0, {
+      foo: 'a'
+    }).setHasLocalMutations();
     const doc1 = doc('collection/key1', 1, { foo: 'a' });
-    const doc3Local = doc(
-      'collection/key3',
-      0,
-      { foo: 'c' },
-      { hasLocalMutations: true }
-    );
+    const doc3Local = doc('collection/key3', 0, {
+      foo: 'c'
+    }).setHasLocalMutations();
     const doc3 = doc('collection/key3', 2, { foo: 'c' });
     return spec()
       .userListens(query1)
@@ -401,19 +399,9 @@ describeSpec('Persistence Recovery', ['no-ios', 'no-android'], () => {
 
   specTest('Writes are pending until acknowledgement is persisted', [], () => {
     const query1 = query('collection');
-    const doc1Local = doc(
-      'collection/a',
-      0,
-      { v: 1 },
-      { hasLocalMutations: true }
-    );
+    const doc1Local = doc('collection/a', 0, { v: 1 }).setHasLocalMutations();
     const doc1 = doc('collection/a', 1001, { v: 1 });
-    const doc2Local = doc(
-      'collection/b',
-      0,
-      { v: 2 },
-      { hasLocalMutations: true }
-    );
+    const doc2Local = doc('collection/b', 0, { v: 2 }).setHasLocalMutations();
     const doc2 = doc('collection/b', 1002, { v: 2 });
     return (
       spec()
@@ -453,12 +441,9 @@ describeSpec('Persistence Recovery', ['no-ios', 'no-android'], () => {
     [],
     () => {
       const query1 = query('collection');
-      const doc1Local = doc(
-        'collection/key1',
-        0,
-        { foo: 'a' },
-        { hasLocalMutations: true }
-      );
+      const doc1Local = doc('collection/key1', 0, {
+        foo: 'a'
+      }).setHasLocalMutations();
       const doc1 = doc('collection/key1', 1, { foo: 'a' });
       const doc2 = doc('collection/key2', 2, { foo: 'b' });
       return spec()
@@ -491,7 +476,7 @@ describeSpec('Persistence Recovery', ['no-ios', 'no-android'], () => {
       const deletedDoc1 = deletedDoc('collection/key1', 2000);
       return (
         spec()
-          .withGCEnabled(false)
+          .ensureManualLruGC()
           .userListens(query1)
           .watchAcksFull(query1, 1000, doc1)
           .expectEvents(query1, {
@@ -506,7 +491,8 @@ describeSpec('Persistence Recovery', ['no-ios', 'no-android'], () => {
           .recoverDatabase()
           .userUnlistens(query1)
           // No event since the document was removed
-          .userListens(query1, 'resume-token-1000')
+          .userListens(query1, { resumeToken: 'resume-token-1000' })
+          .expectEvents(query1, { fromCache: true })
       );
     }
   );
@@ -550,7 +536,7 @@ describeSpec('Persistence Recovery', ['no-ios', 'no-android'], () => {
     const doc2 = doc('collection/key2', 2000, { foo: 'b' });
     return (
       spec()
-        .withGCEnabled(false)
+        .ensureManualLruGC()
         .userListens(query1)
         .watchAcksFull(query1, 1000, doc1)
         .expectEvents(query1, {
@@ -586,7 +572,7 @@ describeSpec('Persistence Recovery', ['no-ios', 'no-android'], () => {
     const doc2 = doc('collection/key2', 2000, { foo: 'b' });
     return (
       spec()
-        .withGCEnabled(false)
+        .ensureManualLruGC()
         .userListens(doc1Query)
         .watchAcksFull(doc1Query, 1000, doc1a)
         .expectEvents(doc1Query, {
@@ -612,7 +598,7 @@ describeSpec('Persistence Recovery', ['no-ios', 'no-android'], () => {
         // Verify that `doc1Query` can be listened to again. Note that the
         // resume token is slightly outdated since we failed to persist the
         // target update during the release.
-        .userListens(doc1Query, 'resume-token-1000')
+        .userListens(doc1Query, { resumeToken: 'resume-token-1000' })
         .expectEvents(doc1Query, {
           added: [doc1a],
           fromCache: true
@@ -634,7 +620,7 @@ describeSpec('Persistence Recovery', ['no-ios', 'no-android'], () => {
       const doc1b = doc('collection/key1', 1500, { included: false });
       const limboQuery = newQueryForPath(doc1a.key.path);
       return spec()
-        .withGCEnabled(false)
+        .ensureManualLruGC()
         .userListens(fullQuery)
         .watchAcksFull(fullQuery, 1000, doc1a)
         .expectEvents(fullQuery, {
@@ -658,7 +644,10 @@ describeSpec('Persistence Recovery', ['no-ios', 'no-android'], () => {
             query: filteredQuery,
             resumeToken: 'resume-token-2000'
           },
-          { query: limboQuery }
+          {
+            query: limboQuery,
+            targetPurpose: TargetPurpose.LimboResolution
+          }
         )
         .watchAcksFull(filteredQuery, 4000)
         .watchAcksFull(limboQuery, 4000, doc1b)
@@ -675,7 +664,7 @@ describeSpec('Persistence Recovery', ['no-ios', 'no-android'], () => {
     const doc1 = doc('collection/key1', 1, { included: true });
     const limboQuery = newQueryForPath(doc1.key.path);
     return spec()
-      .withGCEnabled(false)
+      .ensureManualLruGC()
       .userListens(fullQuery)
       .watchAcksFull(fullQuery, 1000, doc1)
       .expectEvents(fullQuery, {
@@ -699,7 +688,7 @@ describeSpec('Persistence Recovery', ['no-ios', 'no-android'], () => {
       .runTimer(TimerId.AsyncQueueRetry)
       .expectActiveTargets(
         { query: filteredQuery, resumeToken: 'resume-token-2000' },
-        { query: limboQuery }
+        { query: limboQuery, targetPurpose: TargetPurpose.LimboResolution }
       )
       .watchAcksFull(filteredQuery, 3000)
       .watchRemoves(
@@ -717,12 +706,9 @@ describeSpec('Persistence Recovery', ['no-ios', 'no-android'], () => {
     ['durable-persistence'],
     () => {
       const query1 = query('collection');
-      const doc1 = doc(
-        'collection/key1',
-        0,
-        { foo: 'a' },
-        { hasLocalMutations: true }
-      );
+      const doc1 = doc('collection/key1', 0, {
+        foo: 'a'
+      }).setHasLocalMutations();
       return (
         spec()
           .changeUser('user1')
@@ -739,7 +725,9 @@ describeSpec('Persistence Recovery', ['no-ios', 'no-android'], () => {
           .expectActiveTargets()
           .recoverDatabase()
           .runTimer(TimerId.AsyncQueueRetry)
-          .expectActiveTargets({ query: query1 })
+          .expectActiveTargets({
+            query: query1
+          })
           .expectEvents(query1, { removed: [doc1], fromCache: true })
           .failDatabaseTransactions('Handle user change')
           .changeUser('user1')
@@ -747,7 +735,9 @@ describeSpec('Persistence Recovery', ['no-ios', 'no-android'], () => {
           .expectActiveTargets()
           .recoverDatabase()
           .runTimer(TimerId.AsyncQueueRetry)
-          .expectActiveTargets({ query: query1 })
+          .expectActiveTargets({
+            query: query1
+          })
           .expectEvents(query1, {
             added: [doc1],
             fromCache: true,
@@ -762,12 +752,9 @@ describeSpec('Persistence Recovery', ['no-ios', 'no-android'], () => {
     ['durable-persistence'],
     () => {
       const query1 = query('collection');
-      const doc1 = doc(
-        'collection/key1',
-        0,
-        { foo: 'a' },
-        { hasLocalMutations: true }
-      );
+      const doc1 = doc('collection/key1', 0, {
+        foo: 'a'
+      }).setHasLocalMutations();
       return (
         spec()
           .changeUser('user1')
@@ -786,7 +773,9 @@ describeSpec('Persistence Recovery', ['no-ios', 'no-android'], () => {
           .changeUser('user1')
           .recoverDatabase()
           .runTimer(TimerId.AsyncQueueRetry)
-          .expectActiveTargets({ query: query1 })
+          .expectActiveTargets({
+            query: query1
+          })
           // We are now user 2
           .expectEvents(query1, { removed: [doc1], fromCache: true })
           .runTimer(TimerId.AsyncQueueRetry)
@@ -819,7 +808,7 @@ describeSpec('Persistence Recovery', ['no-ios', 'no-android'], () => {
     const doc1 = doc('collection/key1', 1, { foo: 'a' });
     const doc2 = doc('collection/key2', 2, { foo: 'b' });
     return spec()
-      .withGCEnabled(false)
+      .ensureManualLruGC()
       .userListens(query1)
       .watchAcksFull(query1, 1000, doc1)
       .expectEvents(query1, {
@@ -829,7 +818,7 @@ describeSpec('Persistence Recovery', ['no-ios', 'no-android'], () => {
       .userUnlistens(query1)
       .watchRemoves(query1)
       .recoverDatabase()
-      .userListens(query1, 'resume-token-1000')
+      .userListens(query1, { resumeToken: 'resume-token-1000' })
       .expectEvents(query1, {
         added: [doc1],
         fromCache: true

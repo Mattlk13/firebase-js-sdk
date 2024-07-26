@@ -16,8 +16,16 @@
  */
 
 import { expect } from 'chai';
+
+import { Timestamp } from '../../../src/api/timestamp';
 import { queryToTarget } from '../../../src/core/query';
 import { SnapshotVersion } from '../../../src/core/snapshot_version';
+import {
+  canonifyTarget,
+  Target,
+  targetEquals,
+  TargetImpl
+} from '../../../src/core/target';
 import { TargetId } from '../../../src/core/types';
 import { IndexedDbPersistence } from '../../../src/local/indexeddb_persistence';
 import { Persistence } from '../../../src/local/persistence';
@@ -31,15 +39,8 @@ import {
   version
 } from '../../util/helpers';
 
-import { Timestamp } from '../../../src/api/timestamp';
 import * as persistenceHelpers from './persistence_test_helpers';
 import { TestTargetCache } from './test_target_cache';
-import {
-  canonifyTarget,
-  Target,
-  targetEquals,
-  TargetImpl
-} from '../../../src/core/target';
 
 describe('MemoryTargetCache', () => {
   genericTargetCacheTests(persistenceHelpers.testMemoryEagerPersistence);
@@ -98,7 +99,8 @@ describe('IndexedDbTargetCache', () => {
     const actualTargetData = await targetCache2.getTargetData(target);
     expect(targetData).to.deep.equal(actualTargetData);
 
-    const actualSnapshotVersion = await targetCache2.getLastRemoteSnapshotVersion();
+    const actualSnapshotVersion =
+      await targetCache2.getLastRemoteSnapshotVersion();
     expect(snapshotVersion.isEqual(actualSnapshotVersion)).to.be.true;
     await db2.shutdown();
     await persistenceHelpers.clearTestPersistence();
@@ -119,7 +121,7 @@ function genericTargetCacheTests(
   const QUERY_GARAGES = queryToTarget(query('garages'));
 
   /**
-   * Creates a new TargetData object from the the given parameters, synthesizing
+   * Creates a new TargetData object from the given parameters, synthesizing
    * a resume token from the snapshot version.
    */
   let previousSequenceNumber = 0;

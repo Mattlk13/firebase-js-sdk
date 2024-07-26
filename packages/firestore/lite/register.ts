@@ -15,25 +15,54 @@
  * limitations under the License.
  */
 
-import { _registerComponent, registerVersion } from '@firebase/app-exp';
+import {
+  _registerComponent,
+  registerVersion,
+  SDK_VERSION
+} from '@firebase/app';
 import { Component, ComponentType } from '@firebase/component';
 
-import { Firestore } from './src/api/database';
 import { version } from '../package.json';
+import {
+  LiteAppCheckTokenProvider,
+  LiteAuthCredentialsProvider
+} from '../src/api/credentials';
+import { databaseIdFromApp } from '../src/core/database_info';
+import { setSDKVersion } from '../src/core/version';
+import { Firestore } from '../src/lite-api/database';
+
+declare module '@firebase/component' {
+  interface NameServiceMapping {
+    'firestore/lite': Firestore;
+  }
+}
 
 export function registerFirestore(): void {
+  setSDKVersion(`${SDK_VERSION}_lite`);
   _registerComponent(
     new Component(
       'firestore/lite',
-      container => {
-        const app = container.getProvider('app-exp').getImmediate()!;
-        return ((app, auth) => new Firestore(app, auth))(
-          app,
-          container.getProvider('auth-internal')
+      (container, { instanceIdentifier: databaseId, options: settings }) => {
+        const app = container.getProvider('app').getImmediate()!;
+        const firestoreInstance = new Firestore(
+          new LiteAuthCredentialsProvider(
+            container.getProvider('auth-internal')
+          ),
+          new LiteAppCheckTokenProvider(
+            container.getProvider('app-check-internal')
+          ),
+          databaseIdFromApp(app, databaseId),
+          app
         );
+        if (settings) {
+          firestoreInstance._setSettings(settings);
+        }
+        return firestoreInstance;
       },
-      ComponentType.PUBLIC
-    )
+      'PUBLIC' as ComponentType.PUBLIC
+    ).setMultipleInstances(true)
   );
-  registerVersion('firestore-lite', version, 'node');
+  // RUNTIME_ENV and BUILD_TARGET are replaced by real values during the compilation
+  registerVersion('firestore-lite', version, '__RUNTIME_ENV__');
+  registerVersion('firestore-lite', version, '__BUILD_TARGET__');
 }

@@ -284,7 +284,7 @@ export const base64: Base64 = {
       ++i;
 
       if (byte1 == null || byte2 == null || byte3 == null || byte4 == null) {
-        throw Error();
+        throw new DecodeBase64StringError();
       }
 
       const outByte1 = (byte1 << 2) | (byte2 >> 4);
@@ -334,11 +334,27 @@ export const base64: Base64 = {
 };
 
 /**
+ * An error encountered while decoding base64 string.
+ */
+export class DecodeBase64StringError extends Error {
+  readonly name = 'DecodeBase64StringError';
+}
+
+/**
  * URL-safe base64 encoding
  */
 export const base64Encode = function (str: string): string {
   const utf8Bytes = stringToByteArray(str);
   return base64.encodeByteArray(utf8Bytes, true);
+};
+
+/**
+ * URL-safe base64 encoding (without "." padding in the end).
+ * e.g. Used in JSON Web Token (JWT) parts.
+ */
+export const base64urlEncodeWithoutPadding = function (str: string): string {
+  // Use base64url encoding and remove padding in the end (dot characters).
+  return base64Encode(str).replace(/\./g, '');
 };
 
 /**

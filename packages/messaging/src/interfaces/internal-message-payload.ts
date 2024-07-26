@@ -27,6 +27,8 @@ export interface MessagePayloadInternal {
   messageType?: MessageType;
   isFirebaseMessaging?: boolean;
   from: string;
+  fcmMessageId: string;
+  productId: number;
   // eslint-disable-next-line camelcase
   collapse_key: string;
 }
@@ -37,6 +39,7 @@ export interface NotificationPayloadInternal extends NotificationOptions {
   // See:https://firebase.google.com/docs/cloud-messaging/xmpp-server-ref.
   // eslint-disable-next-line camelcase
   click_action?: string;
+  icon?: string;
 }
 
 // Defined in

@@ -112,6 +112,7 @@ abstract class BasePath<B extends BasePath<B>> {
   }
 
   lastSegment(): string {
+    debugAssert(!this.isEmpty(), "Can't call lastSegment() on empty path");
     return this.get(this.length - 1);
   }
 
@@ -190,6 +191,8 @@ abstract class BasePath<B extends BasePath<B>> {
 /**
  * A slash-separated path for navigating resources (documents and collections)
  * within Firestore.
+ *
+ * @internal
  */
 export class ResourcePath extends BasePath<ResourcePath> {
   protected construct(
@@ -213,23 +216,35 @@ export class ResourcePath extends BasePath<ResourcePath> {
   }
 
   /**
-   * Creates a resource path from the given slash-delimited string.
+   * Returns a string representation of this path
+   * where each path segment has been encoded with
+   * `encodeURIComponent`.
    */
-  static fromString(path: string): ResourcePath {
+  toUriEncodedString(): string {
+    return this.toArray().map(encodeURIComponent).join('/');
+  }
+
+  /**
+   * Creates a resource path from the given slash-delimited string. If multiple
+   * arguments are provided, all components are combined. Leading and trailing
+   * slashes from all components are ignored.
+   */
+  static fromString(...pathComponents: string[]): ResourcePath {
     // NOTE: The client is ignorant of any path segments containing escape
     // sequences (e.g. __id123__) and just passes them through raw (they exist
     // for legacy reasons and should not be used frequently).
 
-    if (path.indexOf('//') >= 0) {
-      throw new FirestoreError(
-        Code.INVALID_ARGUMENT,
-        `Invalid path (${path}). Paths must not contain // in them.`
-      );
+    const segments: string[] = [];
+    for (const path of pathComponents) {
+      if (path.indexOf('//') >= 0) {
+        throw new FirestoreError(
+          Code.INVALID_ARGUMENT,
+          `Invalid segment (${path}). Paths must not contain // in them.`
+        );
+      }
+      // Strip leading and trailing slashed.
+      segments.push(...path.split('/').filter(segment => segment.length > 0));
     }
-
-    // We may still have an empty segment at the beginning or end if they had a
-    // leading or trailing slash (which we allow).
-    const segments = path.split('/').filter(segment => segment.length > 0);
 
     return new ResourcePath(segments);
   }
@@ -241,7 +256,10 @@ export class ResourcePath extends BasePath<ResourcePath> {
 
 const identifierRegExp = /^[_a-zA-Z][_a-zA-Z0-9]*$/;
 
-/** A dot-separated path for navigating sub-objects within a document. */
+/**
+ * A dot-separated path for navigating sub-objects within a document.
+ * @internal
+ */
 export class FieldPath extends BasePath<FieldPath> {
   protected construct(
     segments: string[],
@@ -262,7 +280,7 @@ export class FieldPath extends BasePath<FieldPath> {
   canonicalString(): string {
     return this.toArray()
       .map(str => {
-        str = str.replace('\\', '\\\\').replace('`', '\\`');
+        str = str.replace(/\\/g, '\\\\').replace(/`/g, '\\`');
         if (!FieldPath.isValidIdentifier(str)) {
           str = '`' + str + '`';
         }

@@ -16,6 +16,7 @@
  */
 
 import { expect } from 'chai';
+
 import { Timestamp } from '../../../src/api/timestamp';
 import { User } from '../../../src/auth/user';
 import { ListenSequence } from '../../../src/core/listen_sequence';
@@ -29,17 +30,14 @@ import {
   LruParams
 } from '../../../src/local/lru_garbage_collector';
 import { MutationQueue } from '../../../src/local/mutation_queue';
-import {
-  Persistence,
-  PersistenceTransaction
-} from '../../../src/local/persistence';
-
+import { Persistence } from '../../../src/local/persistence';
 import { PersistencePromise } from '../../../src/local/persistence_promise';
-import { TargetCache } from '../../../src/local/target_cache';
+import { PersistenceTransaction } from '../../../src/local/persistence_transaction';
 import { RemoteDocumentCache } from '../../../src/local/remote_document_cache';
+import { TargetCache } from '../../../src/local/target_cache';
 import { TargetData, TargetPurpose } from '../../../src/local/target_data';
 import { documentKeySet } from '../../../src/model/collections';
-import { Document, MaybeDocument } from '../../../src/model/document';
+import { MutableDocument } from '../../../src/model/document';
 import { DocumentKey } from '../../../src/model/document_key';
 import {
   Mutation,
@@ -47,10 +45,12 @@ import {
   SetMutation
 } from '../../../src/model/mutation';
 import { AsyncQueue } from '../../../src/util/async_queue';
-import { key, query, version, wrapObject } from '../../util/helpers';
-import { SortedMap } from '../../../src/util/sorted_map';
-import * as PersistenceTestHelpers from './persistence_test_helpers';
+import { newAsyncQueue } from '../../../src/util/async_queue_impl';
 import { primitiveComparator } from '../../../src/util/misc';
+import { SortedMap } from '../../../src/util/sorted_map';
+import { doc, key, query, wrapObject } from '../../util/helpers';
+
+import * as PersistenceTestHelpers from './persistence_test_helpers';
 
 describe('IndexedDbLruDelegate', () => {
   if (!IndexedDbPersistence.isAvailable()) {
@@ -72,7 +72,7 @@ describe('MemoryLruDelegate', () => {
 function genericLruGarbageCollectorTests(
   newPersistence: (params: LruParams, queue: AsyncQueue) => Promise<Persistence>
 ): void {
-  const queue = new AsyncQueue();
+  const queue = newAsyncQueue();
 
   // We need to initialize a few counters so that we can use them when we
   // auto-generate things like targets and documents. Pick arbitrary values
@@ -112,9 +112,14 @@ function genericLruGarbageCollectorTests(
     });
     lruParams = params;
     persistence = await newPersistence(params, queue);
+    const indexManager = persistence.getIndexManager(new User('user'));
     targetCache = persistence.getTargetCache();
-    mutationQueue = persistence.getMutationQueue(new User('user'));
+    mutationQueue = persistence.getMutationQueue(
+      new User('user'),
+      indexManager
+    );
     documentCache = persistence.getRemoteDocumentCache();
+    documentCache.setIndexManager(indexManager);
     initialSequenceNumber = await persistence.runTransaction(
       'highest sequence number',
       'readwrite',
@@ -122,7 +127,7 @@ function genericLruGarbageCollectorTests(
     );
     const referenceDelegate = persistence.referenceDelegate;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    garbageCollector = ((referenceDelegate as any) as LruDelegate)
+    garbageCollector = (referenceDelegate as any as LruDelegate)
       .garbageCollector;
   }
 
@@ -239,26 +244,21 @@ function genericLruGarbageCollectorTests(
     );
   }
 
-  function nextTestDocument(): Document {
+  function nextTestDocument(): MutableDocument {
     const key = nextTestDocumentKey();
-    return new Document(
-      key,
-      version(1000),
-      wrapObject({
-        foo: 3,
-        bar: false
-      }),
-      {}
-    );
+    return doc(key.toString(), 1000, {
+      foo: 3,
+      bar: false
+    });
   }
 
   function saveDocument(
     txn: PersistenceTransaction,
-    doc: MaybeDocument
+    doc: MutableDocument
   ): PersistencePromise<void> {
     const changeBuffer = documentCache.newChangeBuffer();
     return changeBuffer.getEntry(txn, doc.key).next(() => {
-      changeBuffer.addEntry(doc, doc.version);
+      changeBuffer.addEntry(doc);
       return changeBuffer.apply(txn);
     });
   }
@@ -529,7 +529,7 @@ function genericLruGarbageCollectorTests(
       toBeRemoved.forEach(docKey => {
         p = p.next(() => {
           return documentCache.getEntry(txn, docKey).next(maybeDoc => {
-            expect(maybeDoc).to.be.null;
+            expect(maybeDoc.isValidDocument()).to.be.false;
           });
         });
       });
@@ -779,16 +779,11 @@ function genericLruGarbageCollectorTests(
       'Update a doc in the middle target',
       'readwrite',
       txn => {
-        const doc = new Document(
-          middleDocToUpdate,
-          version(2000),
-          wrapObject({
-            foo: 4,
-            bar: true
-          }),
-          {}
-        );
-        return saveDocument(txn, doc).next(() => {
+        const docA = doc(middleDocToUpdate.toString(), 2000, {
+          foo: 4,
+          bar: true
+        });
+        return saveDocument(txn, docA).next(() => {
           return updateTargetInTransaction(txn, middleTarget);
         });
       }
@@ -839,7 +834,7 @@ function genericLruGarbageCollectorTests(
         p = p
           .next(() => documentCache.getEntry(txn, key))
           .next(maybeDoc => {
-            expect(maybeDoc).to.be.null;
+            expect(maybeDoc.isValidDocument()).to.be.false;
           });
       });
       expectedRetained.forEach(key => {

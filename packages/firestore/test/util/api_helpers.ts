@@ -19,17 +19,21 @@
 // these in any integration test, where we expect working Firestore object.
 
 import {
-  CollectionReference,
   DocumentReference,
-  DocumentSnapshot,
+  ensureFirestoreConfigured,
   Firestore,
   Query,
-  QuerySnapshot
-} from '../../src/api/database';
+  CollectionReference,
+  QuerySnapshot,
+  DocumentSnapshot,
+  SnapshotMetadata
+} from '../../src';
 import {
-  MultiTabOfflineComponentProvider,
-  OnlineComponentProvider
-} from '../../src/core/component_provider';
+  EmptyAppCheckTokenProvider,
+  EmptyAuthCredentialsProvider
+} from '../../src/api/credentials';
+import { ExpUserDataWriter } from '../../src/api/reference_impl';
+import { DatabaseId } from '../../src/core/database_info';
 import { newQueryForPath, Query as InternalQuery } from '../../src/core/query';
 import {
   ChangeType,
@@ -37,66 +41,39 @@ import {
   ViewSnapshot
 } from '../../src/core/view_snapshot';
 import { DocumentKeySet } from '../../src/model/collections';
-import { Document } from '../../src/model/document';
 import { DocumentSet } from '../../src/model/document_set';
 import { JsonObject } from '../../src/model/object_value';
-import { doc, key, path as pathFrom } from './helpers';
-import { Provider, ComponentContainer } from '@firebase/component';
 import { TEST_PROJECT } from '../unit/local/persistence_test_helpers';
 
-const onlineComponentProvider = new OnlineComponentProvider();
-const offlineComponentProvider = new MultiTabOfflineComponentProvider(
-  onlineComponentProvider
-);
+import { doc, key, path as pathFrom } from './helpers';
+
 /**
  * A mock Firestore. Will not work for integration test.
  */
-export const FIRESTORE = new Firestore(
-  {
-    projectId: TEST_PROJECT,
-    database: '(default)'
-  },
-  new Provider('auth-internal', new ComponentContainer('default')),
-  offlineComponentProvider,
-  onlineComponentProvider
-);
+export const FIRESTORE = newTestFirestore(TEST_PROJECT);
 
 export function firestore(): Firestore {
   return FIRESTORE;
 }
 
-export function newTestFirestore(): Firestore {
+export function newTestFirestore(projectId = 'new-project'): Firestore {
   return new Firestore(
-    {
-      projectId: 'new-project',
-      database: '(default)'
-    },
-    new Provider('auth-internal', new ComponentContainer('default')),
-    offlineComponentProvider,
-    onlineComponentProvider
+    new EmptyAuthCredentialsProvider(),
+    new EmptyAppCheckTokenProvider(),
+    new DatabaseId(projectId)
   );
 }
 
 export function collectionReference(path: string): CollectionReference {
-  const firestoreClient = firestore();
-  // eslint-disable-next-line @typescript-eslint/no-floating-promises
-  firestoreClient.ensureClientConfigured();
-  return new CollectionReference(
-    pathFrom(path),
-    firestoreClient,
-    /* converter= */ null
-  );
+  const db = firestore();
+  ensureFirestoreConfigured(db);
+  return new CollectionReference(db, /* converter= */ null, pathFrom(path));
 }
 
 export function documentReference(path: string): DocumentReference {
-  const firestoreClient = firestore();
-  // eslint-disable-next-line @typescript-eslint/no-floating-promises
-  firestoreClient.ensureClientConfigured();
-  return new DocumentReference(
-    key(path),
-    firestoreClient,
-    /* converter= */ null
-  );
+  const db = firestore();
+  ensureFirestoreConfigured(db);
+  return new DocumentReference(db, /* converter= */ null, key(path));
 }
 
 export function documentSnapshot(
@@ -104,47 +81,48 @@ export function documentSnapshot(
   data: JsonObject<unknown> | null,
   fromCache: boolean
 ): DocumentSnapshot {
+  const db = firestore();
+  const userDataWriter = new ExpUserDataWriter(db);
   if (data) {
     return new DocumentSnapshot(
-      firestore(),
+      db,
+      userDataWriter,
       key(path),
       doc(path, 1, data),
-      fromCache,
-      /* hasPendingWrites= */ false,
+      new SnapshotMetadata(/* hasPendingWrites= */ false, fromCache),
       /* converter= */ null
     );
   } else {
     return new DocumentSnapshot(
-      firestore(),
+      db,
+      userDataWriter,
       key(path),
       null,
-      fromCache,
-      /* hasPendingWrites= */ false,
+      new SnapshotMetadata(/* hasPendingWrites= */ false, fromCache),
       /* converter= */ null
     );
   }
 }
 
 export function query(path: string): Query {
-  return new Query(
-    newQueryForPath(pathFrom(path)),
-    firestore(),
-    /* converter= */ null
-  );
+  const db = firestore();
+  return new Query(db, /* converter= */ null, newQueryForPath(pathFrom(path)));
 }
 
 /**
  * A convenience method for creating a particular query snapshot for tests.
  *
- * @param path To be used in constructing the query.
- * @param oldDocs Provides the prior set of documents in the QuerySnapshot. Each entry maps to a
- *     document, with the key being the document id, and the value being the document contents.
- * @param docsToAdd Specifies data to be added into the query snapshot as of now. Each entry maps
- *     to a document, with the key being the document id, and the value being the document contents.
- * @param mutatedKeys The list of document with pending writes.
- * @param fromCache Whether the query snapshot is cache result.
- * @param syncStateChanged Whether the sync state has changed.
- * @return A query snapshot that consists of both sets of documents.
+ * @param path - To be used in constructing the query.
+ * @param oldDocs - Provides the prior set of documents in the QuerySnapshot.
+ * Each entry maps to a document, with the key being the document id, and the
+ * value being the document contents.
+ * @param docsToAdd - Specifies data to be added into the query snapshot as of
+ * now. Each entry maps to a document, with the key being the document id, and
+ * the value being the document contents.
+ * @param mutatedKeys - The list of document with pending writes.
+ * @param fromCache - Whether the query snapshot is cache result.
+ * @param syncStateChanged - Whether the sync state has changed.
+ * @returns A query snapshot that consists of both sets of documents.
  */
 export function querySnapshot(
   path: string,
@@ -152,7 +130,8 @@ export function querySnapshot(
   docsToAdd: { [key: string]: JsonObject<unknown> },
   mutatedKeys: DocumentKeySet,
   fromCache: boolean,
-  syncStateChanged: boolean
+  syncStateChanged: boolean,
+  hasCachedResults?: boolean
 ): QuerySnapshot {
   const query: InternalQuery = newQueryForPath(pathFrom(path));
   let oldDocuments: DocumentSet = new DocumentSet();
@@ -162,7 +141,7 @@ export function querySnapshot(
   let newDocuments: DocumentSet = new DocumentSet();
   const documentChanges: DocumentViewChange[] = [];
   Object.keys(docsToAdd).forEach(key => {
-    const docToAdd: Document = doc(path + '/' + key, 1, docsToAdd[key]);
+    const docToAdd = doc(path + '/' + key, 1, docsToAdd[key]);
     newDocuments = newDocuments.add(docToAdd);
     documentChanges.push({ type: ChangeType.Added, doc: docToAdd });
   });
@@ -174,12 +153,14 @@ export function querySnapshot(
     mutatedKeys,
     fromCache,
     syncStateChanged,
-    false
+    false,
+    hasCachedResults ?? false
   );
+  const db = firestore();
   return new QuerySnapshot(
-    firestore(),
-    query,
-    viewSnapshot,
-    /* converter= */ null
+    db,
+    new ExpUserDataWriter(db),
+    new Query(db, /* converter= */ null, query),
+    viewSnapshot
   );
 }

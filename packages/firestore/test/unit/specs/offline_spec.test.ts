@@ -16,10 +16,10 @@
  */
 
 import { newQueryForPath } from '../../../src/core/query';
+import { TimerId } from '../../../src/util/async_queue';
 import { Code } from '../../../src/util/error';
 import { doc, query } from '../../util/helpers';
 
-import { TimerId } from '../../../src/util/async_queue';
 import { describeSpec, specTest } from './describe_spec';
 import { spec } from './spec_builder';
 
@@ -239,4 +239,21 @@ describeSpec('Offline:', [], () => {
       );
     }
   );
+
+  specTest('Client stays offline during credential change', [], () => {
+    // Reproduces a bug that caused the client to switch to OnlineState
+    // `Unknown` during a credential change.
+
+    const query1 = query('collection');
+    return (
+      spec()
+        .disableNetwork()
+        .changeUser('user1')
+        .userListens(query1)
+        // Client is still offline and we raise a `fromCache` event immediately
+        .expectEvents(query1, {
+          fromCache: true
+        })
+    );
+  });
 });

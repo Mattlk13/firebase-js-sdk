@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+import { DatabaseId } from '../core/database_info';
 import {
   ArrayValue,
   LatLng,
@@ -22,25 +23,36 @@ import {
   Timestamp,
   Value
 } from '../protos/firestore_proto_api';
-
-import { TypeOrder } from './object_value';
-import { fail, hardAssert } from '../util/assert';
-import { forEach, objectSize } from '../util/obj';
-import { ByteString } from '../util/byte_string';
-import { isNegativeZero } from '../util/types';
-import { DocumentKey } from './document_key';
+import { fail } from '../util/assert';
 import { arrayEquals, primitiveComparator } from '../util/misc';
-import { DatabaseId } from '../core/database_info';
+import { forEach, objectSize } from '../util/obj';
+import { isNegativeZero } from '../util/types';
+
+import { DocumentKey } from './document_key';
+import {
+  normalizeByteString,
+  normalizeNumber,
+  normalizeTimestamp
+} from './normalize';
 import {
   getLocalWriteTime,
   getPreviousValue,
   isServerTimestamp
 } from './server_timestamps';
+import { TypeOrder } from './type_order';
 
-// A RegExp matching ISO 8601 UTC timestamps with optional fraction.
-const ISO_TIMESTAMP_REG_EXP = new RegExp(
-  /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.(\d+))?Z$/
-);
+const MAX_VALUE_TYPE = '__max__';
+export const MAX_VALUE: Value = {
+  mapValue: {
+    fields: {
+      '__type__': { stringValue: MAX_VALUE_TYPE }
+    }
+  }
+};
+
+export const MIN_VALUE: Value = {
+  nullValue: 'NULL_VALUE'
+};
 
 /** Extracts the backend's type order for the provided value. */
 export function typeOrder(value: Value): TypeOrder {
@@ -65,6 +77,8 @@ export function typeOrder(value: Value): TypeOrder {
   } else if ('mapValue' in value) {
     if (isServerTimestamp(value)) {
       return TypeOrder.ServerTimestampValue;
+    } else if (isMaxValue(value)) {
+      return TypeOrder.MaxValue;
     }
     return TypeOrder.ObjectValue;
   } else {
@@ -74,6 +88,10 @@ export function typeOrder(value: Value): TypeOrder {
 
 /** Tests `left` and `right` for equality based on the backend semantics. */
 export function valueEquals(left: Value, right: Value): boolean {
+  if (left === right) {
+    return true;
+  }
+
   const leftType = typeOrder(left);
   const rightType = typeOrder(right);
   if (leftType !== rightType) {
@@ -107,6 +125,8 @@ export function valueEquals(left: Value, right: Value): boolean {
       );
     case TypeOrder.ObjectValue:
       return objectEquals(left, right);
+    case TypeOrder.MaxValue:
+      return true;
     default:
       return fail('Unexpected value type: ' + JSON.stringify(left));
   }
@@ -196,6 +216,10 @@ export function arrayValueContains(
 }
 
 export function valueCompare(left: Value, right: Value): number {
+  if (left === right) {
+    return 0;
+  }
+
   const leftType = typeOrder(left);
   const rightType = typeOrder(right);
 
@@ -205,6 +229,7 @@ export function valueCompare(left: Value, right: Value): number {
 
   switch (leftType) {
     case TypeOrder.NullValue:
+    case TypeOrder.MaxValue:
       return 0;
     case TypeOrder.BooleanValue:
       return primitiveComparator(left.booleanValue!, right.booleanValue!);
@@ -325,6 +350,14 @@ function compareArrays(left: ArrayValue, right: ArrayValue): number {
 }
 
 function compareMaps(left: MapValue, right: MapValue): number {
+  if (left === MAX_VALUE.mapValue && right === MAX_VALUE.mapValue) {
+    return 0;
+  } else if (left === MAX_VALUE.mapValue) {
+    return 1;
+  } else if (right === MAX_VALUE.mapValue) {
+    return -1;
+  }
+
   const leftMap = left.fields || {};
   const leftKeys = Object.keys(leftMap);
   const rightMap = right.fields || {};
@@ -480,7 +513,7 @@ export function estimateByteSize(value: Value): number {
 
 function estimateMapByteSize(mapValue: MapValue): number {
   let size = 0;
-  forEach(mapValue.fields || {}, (key, val) => {
+  forEach(mapValue.fields, (key, val) => {
     size += key.length + estimateByteSize(val);
   });
   return size;
@@ -491,72 +524,6 @@ function estimateArrayByteSize(arrayValue: ArrayValue): number {
     (previousSize, value) => previousSize + estimateByteSize(value),
     0
   );
-}
-
-/**
- * Converts the possible Proto values for a timestamp value into a "seconds and
- * nanos" representation.
- */
-export function normalizeTimestamp(
-  date: Timestamp
-): { seconds: number; nanos: number } {
-  hardAssert(!!date, 'Cannot normalize null or undefined timestamp.');
-
-  // The json interface (for the browser) will return an iso timestamp string,
-  // while the proto js library (for node) will return a
-  // google.protobuf.Timestamp instance.
-  if (typeof date === 'string') {
-    // The date string can have higher precision (nanos) than the Date class
-    // (millis), so we do some custom parsing here.
-
-    // Parse the nanos right out of the string.
-    let nanos = 0;
-    const fraction = ISO_TIMESTAMP_REG_EXP.exec(date);
-    hardAssert(!!fraction, 'invalid timestamp: ' + date);
-    if (fraction[1]) {
-      // Pad the fraction out to 9 digits (nanos).
-      let nanoStr = fraction[1];
-      nanoStr = (nanoStr + '000000000').substr(0, 9);
-      nanos = Number(nanoStr);
-    }
-
-    // Parse the date to get the seconds.
-    const parsedDate = new Date(date);
-    const seconds = Math.floor(parsedDate.getTime() / 1000);
-
-    return { seconds, nanos };
-  } else {
-    // TODO(b/37282237): Use strings for Proto3 timestamps
-    // assert(!this.options.useProto3Json,
-    //   'The timestamp instance format requires Proto JS.');
-    const seconds = normalizeNumber(date.seconds);
-    const nanos = normalizeNumber(date.nanos);
-    return { seconds, nanos };
-  }
-}
-
-/**
- * Converts the possible Proto types for numbers into a JavaScript number.
- * Returns 0 if the value is not numeric.
- */
-export function normalizeNumber(value: number | string | undefined): number {
-  // TODO(bjornick): Handle int64 greater than 53 bits.
-  if (typeof value === 'number') {
-    return value;
-  } else if (typeof value === 'string') {
-    return Number(value);
-  } else {
-    return 0;
-  }
-}
-
-/** Converts the possible Proto types for Blobs into a ByteString. */
-export function normalizeByteString(blob: string | Uint8Array): ByteString {
-  if (typeof blob === 'string') {
-    return ByteString.fromBase64String(blob);
-  } else {
-    return ByteString.fromUint8Array(blob);
-  }
 }
 
 /** Returns a reference value for the provided database and key. */
@@ -620,4 +587,129 @@ export function isMapValue(
   value?: Value | null
 ): value is { mapValue: MapValue } {
   return !!value && 'mapValue' in value;
+}
+
+/** Creates a deep copy of `source`. */
+export function deepClone(source: Value): Value {
+  if (source.geoPointValue) {
+    return { geoPointValue: { ...source.geoPointValue } };
+  } else if (
+    source.timestampValue &&
+    typeof source.timestampValue === 'object'
+  ) {
+    return { timestampValue: { ...source.timestampValue } };
+  } else if (source.mapValue) {
+    const target: Value = { mapValue: { fields: {} } };
+    forEach(
+      source.mapValue.fields,
+      (key, val) => (target.mapValue!.fields![key] = deepClone(val))
+    );
+    return target;
+  } else if (source.arrayValue) {
+    const target: Value = { arrayValue: { values: [] } };
+    for (let i = 0; i < (source.arrayValue.values || []).length; ++i) {
+      target.arrayValue!.values![i] = deepClone(source.arrayValue.values![i]);
+    }
+    return target;
+  } else {
+    return { ...source };
+  }
+}
+
+/** Returns true if the Value represents the canonical {@link #MAX_VALUE} . */
+export function isMaxValue(value: Value): boolean {
+  return (
+    (((value.mapValue || {}).fields || {})['__type__'] || {}).stringValue ===
+    MAX_VALUE_TYPE
+  );
+}
+
+/** Returns the lowest value for the given value type (inclusive). */
+export function valuesGetLowerBound(value: Value): Value {
+  if ('nullValue' in value) {
+    return MIN_VALUE;
+  } else if ('booleanValue' in value) {
+    return { booleanValue: false };
+  } else if ('integerValue' in value || 'doubleValue' in value) {
+    return { doubleValue: NaN };
+  } else if ('timestampValue' in value) {
+    return { timestampValue: { seconds: Number.MIN_SAFE_INTEGER } };
+  } else if ('stringValue' in value) {
+    return { stringValue: '' };
+  } else if ('bytesValue' in value) {
+    return { bytesValue: '' };
+  } else if ('referenceValue' in value) {
+    return refValue(DatabaseId.empty(), DocumentKey.empty());
+  } else if ('geoPointValue' in value) {
+    return { geoPointValue: { latitude: -90, longitude: -180 } };
+  } else if ('arrayValue' in value) {
+    return { arrayValue: {} };
+  } else if ('mapValue' in value) {
+    return { mapValue: {} };
+  } else {
+    return fail('Invalid value type: ' + JSON.stringify(value));
+  }
+}
+
+/** Returns the largest value for the given value type (exclusive). */
+export function valuesGetUpperBound(value: Value): Value {
+  if ('nullValue' in value) {
+    return { booleanValue: false };
+  } else if ('booleanValue' in value) {
+    return { doubleValue: NaN };
+  } else if ('integerValue' in value || 'doubleValue' in value) {
+    return { timestampValue: { seconds: Number.MIN_SAFE_INTEGER } };
+  } else if ('timestampValue' in value) {
+    return { stringValue: '' };
+  } else if ('stringValue' in value) {
+    return { bytesValue: '' };
+  } else if ('bytesValue' in value) {
+    return refValue(DatabaseId.empty(), DocumentKey.empty());
+  } else if ('referenceValue' in value) {
+    return { geoPointValue: { latitude: -90, longitude: -180 } };
+  } else if ('geoPointValue' in value) {
+    return { arrayValue: {} };
+  } else if ('arrayValue' in value) {
+    return { mapValue: {} };
+  } else if ('mapValue' in value) {
+    return MAX_VALUE;
+  } else {
+    return fail('Invalid value type: ' + JSON.stringify(value));
+  }
+}
+
+export function lowerBoundCompare(
+  left: { value: Value; inclusive: boolean },
+  right: { value: Value; inclusive: boolean }
+): number {
+  const cmp = valueCompare(left.value, right.value);
+  if (cmp !== 0) {
+    return cmp;
+  }
+
+  if (left.inclusive && !right.inclusive) {
+    return -1;
+  } else if (!left.inclusive && right.inclusive) {
+    return 1;
+  }
+
+  return 0;
+}
+
+export function upperBoundCompare(
+  left: { value: Value; inclusive: boolean },
+  right: { value: Value; inclusive: boolean }
+): number {
+  const cmp = valueCompare(left.value, right.value);
+  if (cmp !== 0) {
+    return cmp;
+  }
+
+  if (left.inclusive && !right.inclusive) {
+    return 1;
+  } else if (!left.inclusive && right.inclusive) {
+    return -1;
+  }
+
+  return 0;
 }

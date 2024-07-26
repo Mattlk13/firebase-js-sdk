@@ -45,7 +45,7 @@ interface ErrorParams {
   };
   [ErrorCode.REQUEST_FAILED]: {
     requestName: string;
-    [index: string]: string | number; // to make Typescript 3.8 happy
+    [index: string]: string | number; // to make TypeScript 3.8 happy
   } & ServerErrorData;
 }
 
@@ -61,7 +61,7 @@ export interface ServerErrorData {
   serverStatus: string;
 }
 
-export type ServerError = FirebaseError & ServerErrorData;
+export type ServerError = FirebaseError & { customData: ServerErrorData };
 
 /** Returns true if error is a FirebaseError that is based on an error from the server. */
 export function isServerError(error: unknown): error is ServerError {

@@ -15,12 +15,12 @@
  * limitations under the License.
  */
 
-import * as yargs from 'yargs';
 import { rollup } from 'rollup';
+import * as yargs from 'yargs';
 
-const typescriptPlugin = require('rollup-plugin-typescript2');
 const alias = require('@rollup/plugin-alias');
-const json = require('rollup-plugin-json');
+const json = require('@rollup/plugin-json');
+const typescriptPlugin = require('rollup-plugin-typescript2');
 
 const util = require('../rollup.shared');
 
@@ -35,10 +35,10 @@ const argv = yargs.options({
     demandOption: true,
     desc: 'The location for the transpiled JavaScript bundle'
   }
-}).argv;
+}).parseSync();
 
 /**
- * Builds an ESM bundle for the Typescript file at `index` and writes it the
+ * Builds an ESM bundle for the TypeScript file at `index` and writes it the
  * file located at `output`.
  *
  * This is used in the `gendeps` build and does not minify or mangle property

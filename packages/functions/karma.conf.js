@@ -16,8 +16,9 @@
  */
 
 const karmaBase = require('../../config/karma.base');
+const webpackBase = require('../../config/webpack.test');
 
-const files = [`test/**/*`];
+const files = [`src/**/*.test.ts`];
 
 module.exports = function (config) {
   const karmaConfig = Object.assign({}, karmaBase, {
@@ -25,7 +26,18 @@ module.exports = function (config) {
     files,
     // frameworks to use
     // available frameworks: https://npmjs.org/browse/keyword/karma-adapter
-    frameworks: ['mocha']
+    frameworks: ['mocha'],
+    // undici is a fetch polyfill that test helpers call for Node tests, and browser tests should
+    // ignore its import to avoid compilation errors in those test helpers.
+    webpack: {
+      ...webpackBase,
+      resolve: {
+        ...webpackBase.resolve,
+        alias: {
+          'undici': false
+        }
+      }
+    }
   });
 
   config.set(karmaConfig);

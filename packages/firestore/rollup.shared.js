@@ -16,7 +16,7 @@
  */
 
 const tmp = require('tmp');
-const json = require('rollup-plugin-json');
+const json = require('@rollup/plugin-json');
 const alias = require('@rollup/plugin-alias');
 const typescriptPlugin = require('rollup-plugin-typescript2');
 const typescript = require('typescript');
@@ -46,7 +46,7 @@ const pkg = require('./package.json');
 // for calls to `enablePersistence()` or `clearPersistence()`.
 //
 // We use two different rollup pipelines to take advantage of tree shaking,
-// as Rollup does not support tree shaking for Typescript classes transpiled
+// as Rollup does not support tree shaking for TypeScript classes transpiled
 // down to ES5 (see https://bit.ly/340P23U). The build pipeline in this file
 // produces tree-shaken ES2017 builds that are consumed by the ES5 builds in
 // `rollup.config.es.js`.
@@ -74,24 +74,40 @@ function generateAliasConfig(platform) {
 }
 exports.generateAliasConfig = generateAliasConfig;
 
-const browserDeps = Object.keys(
-  Object.assign({}, pkg.peerDependencies, pkg.dependencies)
-);
+const browserDeps = [
+  ...Object.keys(Object.assign({}, pkg.peerDependencies, pkg.dependencies)),
+  '@firebase/app'
+];
 
-const nodeDeps = [...browserDeps, 'util', 'path'];
+const nodeDeps = [...browserDeps, 'util', 'path', 'url'];
 
 /** Resolves the external dependencies for the browser build. */
 exports.resolveBrowserExterns = function (id) {
-  return browserDeps.some(dep => id === dep || id.startsWith(`${dep}/`));
+  return [...browserDeps, '@firebase/firestore'].some(
+    dep => id === dep || id.startsWith(`${dep}/`)
+  );
 };
 
 /** Resolves the external dependencies for the Node build. */
 exports.resolveNodeExterns = function (id) {
-  return nodeDeps.some(dep => id === dep || id.startsWith(`${dep}/`));
+  return [...nodeDeps, '@firebase/firestore'].some(
+    dep => id === dep || id.startsWith(`${dep}/`)
+  );
+};
+
+/** Breaks the build if there is a circular dependency. */
+exports.onwarn = function (warning, defaultWarn) {
+  if (warning.code === 'CIRCULAR_DEPENDENCY') {
+    throw new Error(warning);
+  }
+  defaultWarn(warning);
 };
 
 const externsPaths = externs.map(p => path.resolve(__dirname, '../../', p));
+
 const publicIdentifiers = extractPublicIdentifiers(externsPaths);
+// manually add `_delegate` because we don't have typings for the compat package
+publicIdentifiers.add('_delegate');
 
 /**
  * Transformers that remove calls to `debugAssert` and messages for 'fail` and
@@ -117,7 +133,8 @@ const removeAssertAndPrefixInternalTransformer = service => ({
   ],
   after: []
 });
-exports.removeAssertAndPrefixInternalTransformer = removeAssertAndPrefixInternalTransformer;
+exports.removeAssertAndPrefixInternalTransformer =
+  removeAssertAndPrefixInternalTransformer;
 
 /**
  * Terser options that mangle all properties prefixed with __PRIVATE_.
@@ -127,13 +144,103 @@ const manglePrivatePropertiesOptions = {
     comments: 'all',
     beautify: true
   },
+  keep_fnames: true,
+  keep_classnames: true,
   mangle: {
+    // Temporary hack fix for an issue where mangled code causes some downstream
+    // bundlers (Babel?) to confuse the same variable name in different scopes.
+    // This can be removed if the problem in the downstream library is fixed
+    // or if terser's mangler provides an option to avoid mangling everything
+    // that isn't a property.
+    // `lastReasonableEscapeIndex` was causing problems in a switch statement
+    // due to a Closure bug.
+    // See issue: https://github.com/firebase/firebase-js-sdk/issues/5384
+    reserved: ['_getProvider', '__PRIVATE_lastReasonableEscapeIndex'],
     properties: {
-      regex: /^__PRIVATE_/
+      regex: /^__PRIVATE_/,
+      // All JS Keywords are reserved. Although this should be taken cared of by
+      // Terser, we have seen issues with `do`, hence the extra caution.
+      reserved: [
+        'abstract',
+        'arguments',
+        'await',
+        'boolean',
+        'break',
+        'byte',
+        'case',
+        'catch',
+        'char',
+        'class',
+        'const',
+        'continue',
+        'debugger',
+        'default',
+        'delete',
+        'do',
+        'double',
+        'else',
+        'enum',
+        'eval',
+        'export',
+        'extends',
+        'false',
+        'final',
+        'finally',
+        'float',
+        'for',
+        'function',
+        'goto',
+        'if',
+        'implements',
+        'import',
+        'in',
+        'instanceof',
+        'int',
+        'interface',
+        'let',
+        'long',
+        'native',
+        'new',
+        'null',
+        'package',
+        'private',
+        'protected',
+        'public',
+        'return',
+        'short',
+        'static',
+        'super',
+        'switch',
+        'synchronized',
+        'this',
+        'throw',
+        'throws',
+        'transient',
+        'true',
+        'try',
+        'typeof',
+        'var',
+        'void',
+        'volatile',
+        'while',
+        'with',
+        'yield'
+      ]
     }
   }
 };
 exports.manglePrivatePropertiesOptions = manglePrivatePropertiesOptions;
+
+exports.applyPrebuilt = function (name = 'prebuilt.js') {
+  return alias({
+    entries: [
+      {
+        find: /^(.*)\/export$/,
+        replacement: `$1\/dist/${name}`
+      }
+    ]
+  });
+};
 
 exports.es2017Plugins = function (platform, mangled = false) {
   if (mangled) {
@@ -175,17 +282,25 @@ exports.es2017ToEs5Plugins = function (mangled = false) {
     return [
       typescriptPlugin({
         typescript,
-        compilerOptions: {
-          allowJs: true
+        tsconfigOverride: {
+          compilerOptions: {
+            allowJs: true
+          }
         },
-        include: ['dist/*.js', 'dist/exp/*.js']
+        include: ['dist/**/*.js'],
+        cacheDir: tmp.dirSync()
       }),
       terser({
         output: {
           comments: 'all',
           beautify: true
         },
-        mangle: true
+        // See comment above `manglePrivatePropertiesOptions`. This build did
+        // not have the identical variable name issue but we should be
+        // consistent.
+        mangle: {
+          reserved: ['_getProvider']
+        }
       }),
       sourcemaps()
     ];
@@ -193,12 +308,59 @@ exports.es2017ToEs5Plugins = function (mangled = false) {
     return [
       typescriptPlugin({
         typescript,
-        compilerOptions: {
-          allowJs: true
+        tsconfigOverride: {
+          compilerOptions: {
+            allowJs: true
+          }
         },
-        include: ['dist/*.js', 'dist/exp/*.js']
+        include: ['dist/**/*.js'],
+        cacheDir: tmp.dirSync()
       }),
       sourcemaps()
+    ];
+  }
+};
+
+exports.es2017PluginsCompat = function (
+  platform,
+  pathTransformer,
+  mangled = false
+) {
+  if (mangled) {
+    return [
+      alias(generateAliasConfig(platform)),
+      typescriptPlugin({
+        typescript,
+        tsconfigOverride: {
+          compilerOptions: {
+            target: 'es2017'
+          }
+        },
+        cacheDir: tmp.dirSync(),
+        abortOnError: true,
+        transformers: [
+          removeAssertAndPrefixInternalTransformer,
+          pathTransformer
+        ]
+      }),
+      json({ preferConst: true }),
+      terser(manglePrivatePropertiesOptions)
+    ];
+  } else {
+    return [
+      alias(generateAliasConfig(platform)),
+      typescriptPlugin({
+        typescript,
+        tsconfigOverride: {
+          compilerOptions: {
+            target: 'es2017'
+          }
+        },
+        cacheDir: tmp.dirSync(),
+        abortOnError: true,
+        transformers: [removeAssertTransformer, pathTransformer]
+      }),
+      json({ preferConst: true })
     ];
   }
 };

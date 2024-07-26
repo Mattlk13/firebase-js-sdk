@@ -15,12 +15,13 @@
  * limitations under the License.
  */
 
+import { Timestamp } from '../lite-api/timestamp';
 import {
   Value as ProtoValue,
   MapValue as ProtoMapValue
 } from '../protos/firestore_proto_api';
-import { Timestamp } from '../api/timestamp';
-import { normalizeTimestamp } from './values';
+
+import { normalizeTimestamp } from './normalize';
 
 /**
  * Represents a locally-applied ServerTimestamp.
@@ -32,9 +33,8 @@ import { normalizeTimestamp } from './values';
  *
  * Notes:
  * - ServerTimestampValue instances are created as the result of applying a
- *   TransformMutation (see TransformMutation.applyTo()). They can only exist in
- *   the local view of a document. Therefore they do not need to be parsed or
- *   serialized.
+ *   transform. They can only exist in the local view of a document. Therefore
+ *   they do not need to be parsed or serialized.
  * - When evaluated locally (e.g. for snapshot.data()), they by default
  *   evaluate to `null`. This behavior can be configured by passing custom
  *   FieldValueOptions to value().
@@ -73,6 +73,17 @@ export function serverTimestamp(
     }
   };
 
+  // We should avoid storing deeply nested server timestamp map values
+  // because we never use the intermediate "previous values".
+  // For example:
+  // previous: 42L, add: t1, result: t1 -> 42L
+  // previous: t1,  add: t2, result: t2 -> 42L (NOT t2 -> t1 -> 42L)
+  // previous: t2,  add: t3, result: t3 -> 42L (NOT t3 -> t2 -> t1 -> 42L)
+  // `getPreviousValue` recursively traverses server timestamps to find the
+  // least recent Value.
+  if (previousValue && isServerTimestamp(previousValue)) {
+    previousValue = getPreviousValue(previousValue);
+  }
   if (previousValue) {
     mapValue.fields![PREVIOUS_VALUE_KEY] = previousValue;
   }

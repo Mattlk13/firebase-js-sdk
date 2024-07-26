@@ -16,6 +16,7 @@
  */
 
 import { SnapshotVersion } from '../core/snapshot_version';
+import { canonifyTarget, Target, targetEquals } from '../core/target';
 import { TargetIdGenerator } from '../core/target_id_generator';
 import { ListenSequenceNumber, TargetId } from '../core/types';
 import { DocumentKeySet } from '../model/collections';
@@ -24,13 +25,12 @@ import { debugAssert } from '../util/assert';
 import { ObjectMap } from '../util/obj_map';
 
 import { ActiveTargets } from './lru_garbage_collector';
-import { MemoryPersistence } from './memory_persistence';
-import { PersistenceTransaction } from './persistence';
+import { Persistence } from './persistence';
 import { PersistencePromise } from './persistence_promise';
+import { PersistenceTransaction } from './persistence_transaction';
 import { ReferenceSet } from './reference_set';
 import { TargetCache } from './target_cache';
 import { TargetData } from './target_data';
-import { canonifyTarget, Target, targetEquals } from '../core/target';
 
 export class MemoryTargetCache implements TargetCache {
   /**
@@ -57,7 +57,7 @@ export class MemoryTargetCache implements TargetCache {
 
   private targetIdGenerator = TargetIdGenerator.forTargetCache();
 
-  constructor(private readonly persistence: MemoryPersistence) {}
+  constructor(private readonly persistence: Persistence) {}
 
   forEachTarget(
     txn: PersistenceTransaction,
@@ -131,7 +131,7 @@ export class MemoryTargetCache implements TargetCache {
   ): PersistencePromise<void> {
     debugAssert(
       this.targets.has(targetData.target),
-      'Updating a non-existent target'
+      'Updating a nonexistent target'
     );
     this.saveTargetData(targetData);
     return PersistencePromise.resolve();
@@ -144,7 +144,7 @@ export class MemoryTargetCache implements TargetCache {
     debugAssert(this.targetCount > 0, 'Removing a target from an empty cache');
     debugAssert(
       this.targets.has(targetData.target),
-      'Removing a non-existent target from the cache'
+      'Removing a nonexistent target from the cache'
     );
     this.targets.delete(targetData.target);
     this.references.removeReferencesForId(targetData.targetId);

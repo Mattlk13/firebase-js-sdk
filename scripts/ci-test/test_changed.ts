@@ -17,13 +17,14 @@
 
 import { resolve } from 'path';
 import { spawn } from 'child-process-promise';
-import { TestReason, filterTasks, getTestTasks } from './tasks';
+import { TestReason, filterTasks, getTestTasks, logTasks } from './tasks';
 import chalk from 'chalk';
-import { argv } from 'yargs';
+import * as yargs from 'yargs';
 import { TestConfig, testConfig } from './testConfig';
 const root = resolve(__dirname, '../..');
 
-const inputTestConfigName = argv._[0];
+const argv = yargs.parseSync();
+const inputTestConfigName = argv._[0].toString();
 const testCommand = 'test:ci';
 
 const allTestConfigNames = Object.keys(testConfig);
@@ -51,6 +52,8 @@ async function runTests(config: TestConfig) {
   try {
     const testTasks = filterTasks(await getTestTasks(), config);
 
+    // print tasks for info
+    logTasks(testTasks);
     if (testTasks.length === 0) {
       chalk`{green No test tasks. Skipping all tests }`;
       process.exit(0);
@@ -77,6 +80,14 @@ async function runTests(config: TestConfig) {
     process.exit(0);
   } catch (e) {
     console.error(chalk`{red ${e}}`);
+
+    const chrome_notes = process.env.CHROME_VERSION_NOTES;
+    if (chrome_notes) {
+      console.error();
+      console.error(chalk`{red ${chrome_notes}}`);
+      console.error();
+    }
+
     process.exit(1);
   }
 }

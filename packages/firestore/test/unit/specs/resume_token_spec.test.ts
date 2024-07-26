@@ -43,7 +43,7 @@ describeSpec('Resume tokens:', [], () => {
     const query1 = query('collection');
     const doc1 = doc('collection/a', 1000, { key: 'a' });
     return spec()
-      .withGCEnabled(false)
+      .ensureManualLruGC()
       .userListens(query1)
       .watchAcks(query1)
       .watchSends({ affects: [query1] }, doc1)
@@ -51,7 +51,7 @@ describeSpec('Resume tokens:', [], () => {
       .watchSnapshots(1000)
       .expectEvents(query1, { added: [doc1] })
       .userUnlistens(query1)
-      .userListens(query1, 'custom-query-resume-token')
+      .userListens(query1, { resumeToken: 'custom-query-resume-token' })
       .expectEvents(query1, { fromCache: true, added: [doc1] })
       .watchAcks(query1)
       .watchSnapshots(1001);

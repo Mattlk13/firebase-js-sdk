@@ -27,14 +27,17 @@ type Entry<K, V> = [K, V];
  */
 export class ObjectMap<KeyType, ValueType> {
   /**
-   * The inner map for a key -> value pair. Due to the possibility of
-   * collisions we keep a list of entries that we do a linear search through
-   * to find an actual match. Note that collisions should be rare, so we still
-   * expect near constant time lookups in practice.
+   * The inner map for a key/value pair. Due to the possibility of collisions we
+   * keep a list of entries that we do a linear search through to find an actual
+   * match. Note that collisions should be rare, so we still expect near
+   * constant time lookups in practice.
    */
   private inner: {
     [canonicalId: string]: Array<Entry<KeyType, ValueType>>;
   } = {};
+
+  /** The number of entries stored in the map */
+  private innerSize = 0;
 
   constructor(
     private mapKeyFn: (key: KeyType) => string,
@@ -66,15 +69,18 @@ export class ObjectMap<KeyType, ValueType> {
     const matches = this.inner[id];
     if (matches === undefined) {
       this.inner[id] = [[key, value]];
+      this.innerSize++;
       return;
     }
     for (let i = 0; i < matches.length; i++) {
       if (this.equalsFn(matches[i][0], key)) {
+        // This is updating an existing entry and does not increase `innerSize`.
         matches[i] = [key, value];
         return;
       }
     }
     matches.push([key, value]);
+    this.innerSize++;
   }
 
   /**
@@ -93,6 +99,7 @@ export class ObjectMap<KeyType, ValueType> {
         } else {
           matches.splice(i, 1);
         }
+        this.innerSize--;
         return true;
       }
     }
@@ -109,5 +116,9 @@ export class ObjectMap<KeyType, ValueType> {
 
   isEmpty(): boolean {
     return isEmpty(this.inner);
+  }
+
+  size(): number {
+    return this.innerSize;
   }
 }

@@ -16,6 +16,7 @@
  */
 
 import { expect } from 'chai';
+
 import { User } from '../../../src/auth/user';
 import {
   BatchId,
@@ -36,17 +37,21 @@ import {
   SharedClientStateSyncer
 } from '../../../src/local/shared_client_state_syncer';
 import { targetIdSet } from '../../../src/model/collections';
-import { AsyncQueue } from '../../../src/util/async_queue';
+import {
+  AsyncQueueImpl,
+  newAsyncQueue
+} from '../../../src/util/async_queue_impl';
 import { FirestoreError } from '../../../src/util/error';
 import { AutoId } from '../../../src/util/misc';
 import { objectSize } from '../../../src/util/obj';
 import { SortedSet } from '../../../src/util/sorted_set';
+import { WindowLike } from '../../../src/util/types';
+import { testWindow } from '../../util/test_platform';
+
 import {
   TEST_PERSISTENCE_PREFIX,
   populateWebStorage
 } from './persistence_test_helpers';
-import { testWindow } from '../../util/test_platform';
-import { WindowLike } from '../../../src/util/types';
 
 /* eslint-disable no-restricted-globals */
 
@@ -72,6 +77,10 @@ function onlineStateKey(): string {
 
 function sequenceNumberKey(): string {
   return `firestore_sequence_number_${TEST_PERSISTENCE_PREFIX}`;
+}
+
+function bundleLoadedKey(): string {
+  return `firestore_bundle_loaded_v2_${TEST_PERSISTENCE_PREFIX}`;
 }
 
 interface TestSharedClientState {
@@ -149,13 +158,15 @@ class TestSharedClientSyncer implements SharedClientStateSyncer {
   applyOnlineStateChange(onlineState: OnlineState): void {
     this.onlineState = onlineState;
   }
+
+  async synchronizeWithChangedDocuments(): Promise<void> {}
 }
 
 describe('WebStorageSharedClientState', () => {
   let window: WindowLike;
   let webStorage: Storage;
 
-  let queue: AsyncQueue;
+  let queue: AsyncQueueImpl;
   let primaryClientId: string;
   let sharedClientState: WebStorageSharedClientState;
   let clientSyncer: TestSharedClientSyncer;
@@ -205,7 +216,7 @@ describe('WebStorageSharedClientState', () => {
     window.removeEventListener = () => {};
 
     primaryClientId = AutoId.newId();
-    queue = new AsyncQueue();
+    queue = newAsyncQueue() as AsyncQueueImpl;
     sharedClientState = new WebStorageSharedClientState(
       window,
       queue,
@@ -215,9 +226,8 @@ describe('WebStorageSharedClientState', () => {
     );
     clientSyncer = new TestSharedClientSyncer([primaryClientId]);
     sharedClientState.syncEngine = clientSyncer;
-    sharedClientState.onlineStateHandler = clientSyncer.applyOnlineStateChange.bind(
-      clientSyncer
-    );
+    sharedClientState.onlineStateHandler =
+      clientSyncer.applyOnlineStateChange.bind(clientSyncer);
   });
 
   afterEach(() => {
@@ -270,9 +280,7 @@ describe('WebStorageSharedClientState', () => {
         .null;
     }
 
-    beforeEach(() => {
-      return sharedClientState.start();
-    });
+    beforeEach(() => sharedClientState.start());
 
     it('with a pending batch', () => {
       sharedClientState.addPendingMutation(0);
@@ -318,9 +326,7 @@ describe('WebStorageSharedClientState', () => {
       }
     }
 
-    beforeEach(() => {
-      return sharedClientState.start();
-    });
+    beforeEach(() => sharedClientState.start());
 
     it('when empty', () => {
       assertClientState([]);
@@ -530,9 +536,7 @@ describe('WebStorageSharedClientState', () => {
   });
 
   describe('processes mutation updates', () => {
-    beforeEach(() => {
-      return sharedClientState.start();
-    });
+    beforeEach(() => sharedClientState.start());
 
     async function withUser(
       user: User,
@@ -786,8 +790,8 @@ describe('WebStorageSharedClientState', () => {
           'rejected'
         );
 
-        const firestoreError = clientState.targetState[firstClientTargetId]
-          .error!;
+        const firestoreError =
+          clientState.targetState[firstClientTargetId].error!;
         expect(firestoreError.code).to.equal('internal');
         expect(firestoreError.message).to.equal('Test Error');
       });
@@ -810,9 +814,7 @@ describe('WebStorageSharedClientState', () => {
   });
 
   describe('syncs sequence numbers', () => {
-    beforeEach(() => {
-      return sharedClientState.start();
-    });
+    beforeEach(() => sharedClientState.start());
 
     function assertSequenceNumber(expected: ListenSequenceNumber): void {
       const sequenceNumberString = webStorage.getItem(sequenceNumberKey());
@@ -837,6 +839,27 @@ describe('WebStorageSharedClientState', () => {
       writeToWebStorage(sequenceNumberKey(), '3');
       await queue.drain();
       expect(sequenceNumbers).to.deep.equal([1, 2, 3]);
+    });
+  });
+
+  describe('processes bundles', () => {
+    beforeEach(() => sharedClientState.start());
+
+    function assertsBundlesLoaded(...collectionGroups: string[]): void {
+      const bundleValue = webStorage.getItem(bundleLoadedKey());
+      expect(bundleValue).to.not.be.null;
+      const actual = JSON.parse(bundleValue!) as string[];
+      expect(actual).to.have.members(collectionGroups);
+    }
+
+    it('writes out collection groups', () => {
+      sharedClientState.notifyBundleLoaded(new Set<string>(['a', 'b']));
+      assertsBundlesLoaded('a', 'b');
+    });
+
+    it('supports empty collection groups', () => {
+      sharedClientState.notifyBundleLoaded(new Set<string>());
+      assertsBundlesLoaded();
     });
   });
 });

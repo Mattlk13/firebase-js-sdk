@@ -30,7 +30,7 @@ describeSpec(
   ['benchmark'],
   () => {
     specTest('Insert a new document', [], () => {
-      const steps = spec().withGCEnabled(false);
+      const steps = spec().ensureManualLruGC();
       for (let i = 0; i < STEP_COUNT; ++i) {
         steps
           .userSets(`collection/{i}`, { doc: i })
@@ -44,16 +44,13 @@ describeSpec(
       [],
       () => {
         let currentVersion = 1;
-        const steps = spec().withGCEnabled(false);
+        const steps = spec().ensureManualLruGC();
 
         for (let i = 0; i < STEP_COUNT; ++i) {
           const query1 = query(`collection/${i}`);
-          const docLocal = doc(
-            `collection/${i}`,
-            0,
-            { doc: i },
-            { hasLocalMutations: true }
-          );
+          const docLocal = doc(`collection/${i}`, 0, {
+            doc: i
+          }).setHasLocalMutations();
           const docRemote = doc(`collection/${i}`, ++currentVersion, {
             doc: i
           });
@@ -80,14 +77,12 @@ describeSpec(
       const cachedDocumentCount = 100;
       9;
       const query1 = query(`collection`, orderBy('v'));
-      const steps = spec().withGCEnabled(false);
+      const steps = spec().ensureManualLruGC();
       const docs: Document[] = [];
 
       for (let i = 0; i < cachedDocumentCount; ++i) {
         steps.userSets(`collection/${i}`, { v: i });
-        docs.push(
-          doc(`collection/${i}`, 0, { v: i }, { hasLocalMutations: true })
-        );
+        docs.push(doc(`collection/${i}`, 0, { v: i }).setHasLocalMutations());
       }
 
       for (let i = 1; i <= STEP_COUNT; ++i) {
@@ -106,7 +101,7 @@ describeSpec(
 
     specTest('Update a single document', [], () => {
       const steps = spec()
-        .withGCEnabled(false)
+        .ensureManualLruGC()
         .userSets(`collection/doc`, { v: 0 });
 
       for (let i = 1; i <= STEP_COUNT; ++i) {
@@ -124,14 +119,11 @@ describeSpec(
         const query1 = query(`collection/doc`);
 
         let currentVersion = 1;
-        const steps = spec().withGCEnabled(false);
+        const steps = spec().ensureManualLruGC();
 
-        let docLocal = doc(
-          `collection/doc`,
-          0,
-          { v: 0 },
-          { hasLocalMutations: true }
-        );
+        let docLocal = doc(`collection/doc`, 0, {
+          v: 0
+        }).setHasLocalMutations();
         let docRemote = doc(`collection/doc`, ++currentVersion, { v: 0 });
         let lastRemoteVersion = currentVersion;
 
@@ -148,12 +140,9 @@ describeSpec(
           .expectEvents(query1, { metadata: [docRemote] });
 
         for (let i = 1; i <= STEP_COUNT; ++i) {
-          docLocal = doc(
-            `collection/doc`,
-            lastRemoteVersion,
-            { v: i },
-            { hasLocalMutations: true }
-          );
+          docLocal = doc(`collection/doc`, lastRemoteVersion, {
+            v: i
+          }).setHasLocalMutations();
           docRemote = doc(`collection/doc`, ++currentVersion, { v: i });
           lastRemoteVersion = currentVersion;
 
@@ -179,7 +168,7 @@ describeSpec(
         const documentsPerStep = 100;
 
         const query1 = query(`collection`, orderBy('v'));
-        const steps = spec().withGCEnabled(false);
+        const steps = spec().ensureManualLruGC();
 
         let currentVersion = 1;
 
@@ -217,7 +206,7 @@ describeSpec(
         const documentsPerStep = 100;
 
         let currentVersion = 1;
-        const steps = spec().withGCEnabled(false);
+        const steps = spec().ensureManualLruGC();
 
         for (let i = 1; i <= STEP_COUNT; ++i) {
           const collPath = `collection/${i}/coll`;
@@ -234,7 +223,9 @@ describeSpec(
             .expectEvents(query1, { added: docs })
             .userUnlistens(query1)
             .watchRemoves(query1)
-            .userListens(query1, 'resume-token-' + currentVersion)
+            .userListens(query1, {
+              resumeToken: 'resume-token-' + currentVersion
+            })
             .expectEvents(query1, { added: docs, fromCache: true })
             .watchAcksFull(query1, ++currentVersion)
             .expectEvents(query1, {})
@@ -250,7 +241,7 @@ describeSpec(
       const queriesPerStep = 25;
 
       let currentVersion = 1;
-      const steps = spec().withGCEnabled(false);
+      const steps = spec().ensureManualLruGC();
 
       for (let i = 1; i <= STEP_COUNT; ++i) {
         // We use a different subcollection for each iteration to ensure
@@ -299,7 +290,7 @@ describeSpec(
         const matchingCount = 10;
         const queryCount = 10;
 
-        const steps = spec().withGCEnabled(false);
+        const steps = spec().ensureManualLruGC();
 
         const collPath = `collection`;
         const query1 = query(collPath, orderBy('val'));

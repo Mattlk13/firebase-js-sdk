@@ -16,7 +16,9 @@
  */
 
 import { LimitType, queryWithLimit } from '../../../src/core/query';
+import { TargetPurpose } from '../../../src/local/target_data';
 import { deletedDoc, doc, filter, orderBy, query } from '../../util/helpers';
+
 import { describeSpec, specTest } from './describe_spec';
 import { client, spec } from './spec_builder';
 
@@ -50,7 +52,7 @@ describeSpec('Limits:', [], () => {
       const doc2 = doc('collection/b', 1000, { key: 'b' });
 
       return spec()
-        .withGCEnabled(false)
+        .ensureManualLruGC()
         .userListens(query1)
         .watchAcksFull(query1, 1000, doc1, doc2)
         .expectEvents(query1, {
@@ -58,7 +60,7 @@ describeSpec('Limits:', [], () => {
         })
         .userUnlistens(query1)
         .userSets('collection/c', { key: 'c' })
-        .userListens(query1, 'resume-token-1000')
+        .userListens(query1, { resumeToken: 'resume-token-1000' })
         .expectEvents(query1, {
           added: [doc1, doc2],
           fromCache: true
@@ -164,7 +166,7 @@ describeSpec('Limits:', [], () => {
     const doc2 = doc('collection/b', 1002, { matches: true });
     const doc3 = doc('collection/c', 1000, { matches: true });
     return spec()
-      .withGCEnabled(false)
+      .ensureManualLruGC()
       .userListens(fullQuery)
       .watchAcksFull(fullQuery, 1002, doc1, doc2, doc3)
       .expectEvents(fullQuery, { added: [doc1, doc2, doc3] })
@@ -191,7 +193,7 @@ describeSpec('Limits:', [], () => {
       const doc2 = doc('collection/b', 1002, { matches: true });
       const doc3 = doc('collection/c', 1003, { matches: true });
       return spec()
-        .withGCEnabled(false)
+        .ensureManualLruGC()
         .userListens(fullQuery)
         .watchAcksFull(fullQuery, 1003, doc1, doc2, doc3)
         .expectEvents(fullQuery, { added: [doc1, doc2, doc3] })
@@ -203,7 +205,7 @@ describeSpec('Limits:', [], () => {
         .userUnlistens(limitQuery)
         .watchRemoves(limitQuery)
         .userSets('collection/a', { matches: false })
-        .userListens(limitQuery, 'resume-token-1004')
+        .userListens(limitQuery, { resumeToken: 'resume-token-1004' })
         .expectEvents(limitQuery, { added: [doc2, doc3], fromCache: true });
     }
   );
@@ -225,7 +227,7 @@ describeSpec('Limits:', [], () => {
       const doc2 = doc('collection/b', 1002, { pos: 2 });
       const doc3 = doc('collection/c', 1003, { pos: 3 });
       return spec()
-        .withGCEnabled(false)
+        .ensureManualLruGC()
         .userListens(fullQuery)
         .watchAcksFull(fullQuery, 1003, doc1, doc2, doc3)
         .expectEvents(fullQuery, { added: [doc1, doc2, doc3] })
@@ -238,7 +240,7 @@ describeSpec('Limits:', [], () => {
         .userUnlistens(limitQuery)
         .watchRemoves(limitQuery)
         .userSets('collection/a', { pos: 4 })
-        .userListens(limitQuery, 'resume-token-1004')
+        .userListens(limitQuery, { resumeToken: 'resume-token-1004' })
         .expectEvents(limitQuery, { added: [doc2, doc3], fromCache: true });
     }
   );
@@ -261,7 +263,7 @@ describeSpec('Limits:', [], () => {
       const doc2 = doc('collection/b', 1002, { pos: 2 });
       const doc3 = doc('collection/c', 1003, { pos: 3 });
       return spec()
-        .withGCEnabled(false)
+        .ensureManualLruGC()
         .userListens(fullQuery)
         .watchAcksFull(fullQuery, 1003, doc1, doc2, doc3)
         .expectEvents(fullQuery, { added: [doc1, doc2, doc3] })
@@ -273,11 +275,11 @@ describeSpec('Limits:', [], () => {
         .expectEvents(limitQuery, {})
         .userUnlistens(limitQuery)
         .watchRemoves(limitQuery)
-        .userListens(fullQuery, 'resume-token-1003')
+        .userListens(fullQuery, { resumeToken: 'resume-token-1003' })
         .expectEvents(fullQuery, { added: [doc1, doc2, doc3], fromCache: true })
         .watchAcksFull(fullQuery, 1005, doc1Edited)
         .expectEvents(fullQuery, { modified: [doc1Edited] })
-        .userListens(limitQuery, 'resume-token-1004')
+        .userListens(limitQuery, { resumeToken: 'resume-token-1004' })
         .expectEvents(limitQuery, { added: [doc2, doc3], fromCache: true });
     }
   );
@@ -302,7 +304,7 @@ describeSpec('Limits:', [], () => {
 
       return (
         spec()
-          .withGCEnabled(false)
+          .ensureManualLruGC()
           .userListens(limitQuery)
           .watchAcksFull(limitQuery, 1001, firstDocument)
           .expectEvents(limitQuery, { added: [firstDocument] })
@@ -332,7 +334,7 @@ describeSpec('Limits:', [], () => {
           // We listen to the limit query again. Note that we include
           // `firstDocument` in the local result since we did not resolve its
           // limbo state.
-          .userListens(limitQuery, 'resume-token-1001')
+          .userListens(limitQuery, { resumeToken: 'resume-token-1001' })
           .expectEvents(limitQuery, { added: [firstDocument], fromCache: true })
           .watchAcks(limitQuery)
           // Watch resumes the query from the provided resume token, but does
@@ -340,9 +342,14 @@ describeSpec('Limits:', [], () => {
           // we receive an existence filter, which indicates that our view is
           // out of sync.
           .watchSends({ affects: [limitQuery] }, secondDocument)
-          .watchFilters([limitQuery], secondDocument.key)
+          .watchFilters([limitQuery], [secondDocument.key])
+          .watchCurrents(limitQuery, 'resume-token-1004')
           .watchSnapshots(1004)
-          .expectActiveTargets({ query: limitQuery, resumeToken: '' })
+          .expectActiveTargets({
+            query: limitQuery,
+            targetPurpose: TargetPurpose.ExistenceFilterMismatch,
+            resumeToken: ''
+          })
           .watchRemoves(limitQuery)
           .watchAcksFull(limitQuery, 1005, secondDocument)
           // The snapshot after the existence filter mismatch triggers limbo
@@ -378,7 +385,7 @@ describeSpec('Limits:', [], () => {
 
     return (
       spec()
-        .withGCEnabled(false)
+        .ensureManualLruGC()
         // We issue a limit query with an orderBy constraint.
         .userListens(limitQuery)
         .watchAcksFull(limitQuery, 2001, firstDocument)
@@ -400,7 +407,7 @@ describeSpec('Limits:', [], () => {
         .watchRemoves(fullQuery)
         // Re-issue the limit query and verify that we return `secondDocument`
         // from cache.
-        .userListens(limitQuery, 'resume-token-2001')
+        .userListens(limitQuery, { resumeToken: 'resume-token-2001' })
         .expectEvents(limitQuery, {
           added: [secondDocument],
           fromCache: true
@@ -534,12 +541,9 @@ describeSpec('Limits:', [], () => {
     () => {
       const query1 = queryWithLimit(query('collection'), 2, LimitType.First);
       const doc1 = doc('collection/a', 1003, { key: 'a' });
-      const doc1Local = doc(
-        'collection/a',
-        0,
-        { key: 'a' },
-        { hasLocalMutations: true }
-      );
+      const doc1Local = doc('collection/a', 0, {
+        key: 'a'
+      }).setHasLocalMutations();
       const doc2 = doc('collection/b', 1001, { key: 'b' });
       const doc3 = doc('collection/c', 1002, { key: 'c' });
       return client(0)

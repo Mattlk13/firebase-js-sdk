@@ -16,25 +16,22 @@
  */
 
 import { doc, orderBy, query } from '../../util/helpers';
+
 import { describeSpec, specTest } from './describe_spec';
 import { spec } from './spec_builder';
 
 describeSpec('OrderBy:', [], () => {
   specTest('orderBy applies filtering based on local state', [], () => {
     const query1 = query('collection', orderBy('sort', 'asc'));
-    const doc1 = doc(
-      'collection/a',
-      0,
-      { key: 'a', sort: 1 },
-      { hasLocalMutations: true }
-    );
+    const doc1 = doc('collection/a', 0, {
+      key: 'a',
+      sort: 1
+    }).setHasLocalMutations();
     const doc2a = doc('collection/b', 1001, { key: 'b' });
-    const doc2b = doc(
-      'collection/b',
-      1001,
-      { key: 'b', sort: 2 },
-      { hasLocalMutations: true }
-    );
+    const doc2b = doc('collection/b', 1001, {
+      key: 'b',
+      sort: 2
+    }).setHasLocalMutations();
     return (
       spec()
         // user set should show up in results
@@ -60,13 +57,13 @@ describeSpec('OrderBy:', [], () => {
     const docB = doc('collection/b', 1001, { key: 'b', sort: 1 });
 
     return spec()
-      .withGCEnabled(false)
+      .ensureManualLruGC()
       .userListens(query1)
       .watchAcksFull(query1, 1002, docA, docB)
       .expectEvents(query1, { added: [docB, docA] })
       .userUnlistens(query1)
       .watchRemoves(query1)
-      .userListens(query1, 'resume-token-1002')
+      .userListens(query1, { resumeToken: 'resume-token-1002' })
       .expectEvents(query1, { added: [docB, docA], fromCache: true })
       .watchAcksFull(query1, 1002)
       .expectEvents(query1, {});

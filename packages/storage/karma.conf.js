@@ -15,8 +15,6 @@
  * limitations under the License.
  */
 
-const karma = require('karma');
-const path = require('path');
 const karmaBase = require('../../config/karma.base');
 const { argv } = require('yargs');
 
@@ -33,12 +31,15 @@ module.exports = function (config) {
 };
 
 function getTestFiles(argv) {
-  if (argv.unit) {
-    return ['test/unit/*'];
+  let unitTestFiles = ['test/unit/*'];
+  let integrationTestFiles = ['test/integration/*', 'test/browser/*'];
+
+  if (argv.unit || process.env?.BROWSERS) {
+    return unitTestFiles;
   } else if (argv.integration) {
-    return ['test/integration/*'];
+    return integrationTestFiles;
   } else {
-    return ['test/**/*'];
+    return [...unitTestFiles, ...integrationTestFiles];
   }
 }
 

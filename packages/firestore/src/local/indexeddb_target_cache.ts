@@ -15,38 +15,40 @@
  * limitations under the License.
  */
 
-import { Timestamp } from '../api/timestamp';
 import { SnapshotVersion } from '../core/snapshot_version';
+import { canonifyTarget, Target, targetEquals } from '../core/target';
+import { TargetIdGenerator } from '../core/target_id_generator';
 import { ListenSequenceNumber, TargetId } from '../core/types';
+import { Timestamp } from '../lite-api/timestamp';
 import { DocumentKeySet, documentKeySet } from '../model/collections';
 import { DocumentKey } from '../model/document_key';
 import { hardAssert } from '../util/assert';
 import { immediateSuccessor } from '../util/misc';
-import { TargetIdGenerator } from '../core/target_id_generator';
+
 import {
   decodeResourcePath,
   encodeResourcePath
 } from './encoded_resource_path';
+import { IndexedDbLruDelegate } from './indexeddb_lru_delegate';
+import { DbTarget, DbTargetDocument, DbTargetGlobal } from './indexeddb_schema';
 import {
-  IndexedDbLruDelegate,
-  IndexedDbPersistence
-} from './indexeddb_persistence';
-import {
-  DbTarget,
-  DbTargetDocument,
+  DbTargetDocumentDocumentTargetsIndex,
   DbTargetDocumentKey,
-  DbTargetGlobal,
+  DbTargetDocumentStore,
   DbTargetGlobalKey,
-  DbTargetKey
-} from './indexeddb_schema';
+  DbTargetGlobalStore,
+  DbTargetKey,
+  DbTargetQueryTargetsIndexName,
+  DbTargetStore
+} from './indexeddb_sentinels';
+import { getStore } from './indexeddb_transaction';
 import { fromDbTarget, LocalSerializer, toDbTarget } from './local_serializer';
 import { ActiveTargets } from './lru_garbage_collector';
-import { PersistenceTransaction } from './persistence';
 import { PersistencePromise } from './persistence_promise';
+import { PersistenceTransaction } from './persistence_transaction';
+import { SimpleDbStore } from './simple_db';
 import { TargetCache } from './target_cache';
 import { TargetData } from './target_data';
-import { SimpleDbStore } from './simple_db';
-import { canonifyTarget, Target, targetEquals } from '../core/target';
 
 export class IndexedDbTargetCache implements TargetCache {
   constructor(
@@ -102,7 +104,8 @@ export class IndexedDbTargetCache implements TargetCache {
     return this.retrieveMetadata(transaction).next(metadata => {
       metadata.highestListenSequenceNumber = highestListenSequenceNumber;
       if (lastRemoteSnapshotVersion) {
-        metadata.lastRemoteSnapshotVersion = lastRemoteSnapshotVersion.toTimestamp();
+        metadata.lastRemoteSnapshotVersion =
+          lastRemoteSnapshotVersion.toTimestamp();
       }
       if (highestListenSequenceNumber > metadata.highestListenSequenceNumber) {
         metadata.highestListenSequenceNumber = highestListenSequenceNumber;
@@ -192,7 +195,7 @@ export class IndexedDbTargetCache implements TargetCache {
     transaction: PersistenceTransaction
   ): PersistencePromise<DbTargetGlobal> {
     return globalTargetStore(transaction)
-      .get(DbTargetGlobal.key)
+      .get(DbTargetGlobalKey)
       .next(metadata => {
         hardAssert(metadata !== null, 'Missing metadata row.');
         return metadata;
@@ -203,7 +206,7 @@ export class IndexedDbTargetCache implements TargetCache {
     transaction: PersistenceTransaction,
     metadata: DbTargetGlobal
   ): PersistencePromise<void> {
-    return globalTargetStore(transaction).put(DbTargetGlobal.key, metadata);
+    return globalTargetStore(transaction).put(DbTargetGlobalKey, metadata);
   }
 
   private saveTargetData(
@@ -260,7 +263,7 @@ export class IndexedDbTargetCache implements TargetCache {
     let result: TargetData | null = null;
     return targetsStore(transaction)
       .iterate(
-        { range, index: DbTarget.queryTargetsIndexName },
+        { range, index: DbTargetQueryTargetsIndexName },
         (key, value, control) => {
           const found = fromDbTarget(value);
           // After finding a potential match, check that the target is
@@ -285,7 +288,7 @@ export class IndexedDbTargetCache implements TargetCache {
     const store = documentTargetStore(txn);
     keys.forEach(key => {
       const path = encodeResourcePath(key.path);
-      promises.push(store.put(new DbTargetDocument(targetId, path)));
+      promises.push(store.put({ targetId, path }));
       promises.push(this.referenceDelegate.addReference(txn, targetId, key));
     });
     return PersistencePromise.waitFor(promises);
@@ -359,7 +362,7 @@ export class IndexedDbTargetCache implements TargetCache {
     return documentTargetStore(txn!)
       .iterate(
         {
-          index: DbTargetDocument.documentTargetsIndex,
+          index: DbTargetDocumentDocumentTargetsIndex,
           keysOnly: true,
           range
         },
@@ -379,8 +382,8 @@ export class IndexedDbTargetCache implements TargetCache {
   /**
    * Looks up a TargetData entry by target ID.
    *
-   * @param targetId The target ID of the TargetData entry to look up.
-   * @return The cached TargetData entry, or null if the cache has no entry for
+   * @param targetId - The target ID of the TargetData entry to look up.
+   * @returns The cached TargetData entry, or null if the cache has no entry for
    * the target.
    */
   // PORTING NOTE: Multi-tab only.
@@ -406,10 +409,7 @@ export class IndexedDbTargetCache implements TargetCache {
 function targetsStore(
   txn: PersistenceTransaction
 ): SimpleDbStore<DbTargetKey, DbTarget> {
-  return IndexedDbPersistence.getStore<DbTargetKey, DbTarget>(
-    txn,
-    DbTarget.store
-  );
+  return getStore<DbTargetKey, DbTarget>(txn, DbTargetStore);
 }
 
 /**
@@ -418,10 +418,7 @@ function targetsStore(
 function globalTargetStore(
   txn: PersistenceTransaction
 ): SimpleDbStore<DbTargetGlobalKey, DbTargetGlobal> {
-  return IndexedDbPersistence.getStore<DbTargetGlobalKey, DbTargetGlobal>(
-    txn,
-    DbTargetGlobal.store
-  );
+  return getStore<DbTargetGlobalKey, DbTargetGlobal>(txn, DbTargetGlobalStore);
 }
 
 /**
@@ -430,8 +427,8 @@ function globalTargetStore(
 export function documentTargetStore(
   txn: PersistenceTransaction
 ): SimpleDbStore<DbTargetDocumentKey, DbTargetDocument> {
-  return IndexedDbPersistence.getStore<DbTargetDocumentKey, DbTargetDocument>(
+  return getStore<DbTargetDocumentKey, DbTargetDocument>(
     txn,
-    DbTargetDocument.store
+    DbTargetDocumentStore
   );
 }

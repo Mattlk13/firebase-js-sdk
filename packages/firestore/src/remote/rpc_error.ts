@@ -74,7 +74,7 @@ export function isPermanentError(code: Code): boolean {
     case Code.ALREADY_EXISTS:
     case Code.PERMISSION_DENIED:
     case Code.FAILED_PRECONDITION:
-    // Aborted might be retried in some scenarios, but that is dependant on
+    // Aborted might be retried in some scenarios, but that is dependent on
     // the context and should handled individually by the calling code.
     // See https://cloud.google.com/apis/design/errors.
     case Code.ABORTED:
@@ -227,7 +227,7 @@ export function mapRpcCodeFromCode(code: Code | undefined): number {
 /**
  * Converts an HTTP Status Code to the equivalent error code.
  *
- * @param status An HTTP Status Code, like 200, 404, 503, etc.
+ * @param status - An HTTP Status Code, like 200, 404, 503, etc.
  * @returns The equivalent Code. Unknown status codes are mapped to
  *     Code.UNKNOWN.
  */
@@ -308,13 +308,13 @@ export function mapCodeFromHttpStatus(status?: number): Code {
 /**
  * Converts an HTTP response's error status to the equivalent error code.
  *
- * @param status An HTTP error response status ("FAILED_PRECONDITION",
+ * @param status - An HTTP error response status ("FAILED_PRECONDITION",
  * "UNKNOWN", etc.)
  * @returns The equivalent Code. Non-matching responses are mapped to
  *     Code.UNKNOWN.
  */
 export function mapCodeFromHttpResponseErrorStatus(status: string): Code {
-  const serverError = status.toLowerCase().replace('_', '-');
+  const serverError = status.toLowerCase().replace(/_/g, '-');
   return Object.values(Code).indexOf(serverError as Code) >= 0
     ? (serverError as Code)
     : Code.UNKNOWN;

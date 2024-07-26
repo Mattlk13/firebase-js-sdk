@@ -16,6 +16,12 @@
  */
 
 import { CONSTANTS } from './constants';
+import { getDefaults } from './defaults';
+
+/**
+ * Type placeholder for `WorkerGlobalScope` from `webworker`
+ */
+declare class WorkerGlobalScope {}
 
 /**
  * Returns navigator.userAgent string or '' if it's not defined.
@@ -52,10 +58,17 @@ export function isMobileCordova(): boolean {
 /**
  * Detect Node.js.
  *
- * @return true if Node.js environment is detected.
+ * @return true if Node.js environment is detected or specified.
  */
 // Node detection logic from: https://github.com/iliakan/detect-node/
 export function isNode(): boolean {
+  const forceEnvironment = getDefaults()?.forceEnvironment;
+  if (forceEnvironment === 'node') {
+    return true;
+  } else if (forceEnvironment === 'browser') {
+    return false;
+  }
+
   try {
     return (
       Object.prototype.toString.call(global.process) === '[object process]'
@@ -67,9 +80,23 @@ export function isNode(): boolean {
 
 /**
  * Detect Browser Environment
+ * Note: This will return true for certain test frameworks that are incompletely
+ * mimicking a browser, and should not lead to assuming all browser APIs are
+ * available.
  */
 export function isBrowser(): boolean {
-  return typeof self === 'object' && self.self === self;
+  return typeof window !== 'undefined' || isWebWorker();
+}
+
+/**
+ * Detect Web Worker context
+ */
+export function isWebWorker(): boolean {
+  return (
+    typeof WorkerGlobalScope !== 'undefined' &&
+    typeof self !== 'undefined' &&
+    self instanceof WorkerGlobalScope
+  );
 }
 
 /**
@@ -130,6 +157,7 @@ export function isNodeSdk(): boolean {
 export function isSafari(): boolean {
   return (
     !isNode() &&
+    !!navigator.userAgent &&
     navigator.userAgent.includes('Safari') &&
     !navigator.userAgent.includes('Chrome')
   );
@@ -140,12 +168,19 @@ export function isSafari(): boolean {
  * @return true if indexedDB is supported by current browser/service worker context
  */
 export function isIndexedDBAvailable(): boolean {
-  return 'indexedDB' in self && indexedDB !== null;
+  try {
+    return typeof indexedDB === 'object';
+  } catch (e) {
+    return false;
+  }
 }
 
 /**
- * This method validates browser context for indexedDB by opening a dummy indexedDB database and reject
+ * This method validates browser/sw context for indexedDB by opening a dummy indexedDB database and reject
  * if errors occur during the database open operation.
+ *
+ * @throws exception if current browser/sw context can't run idb.open (ex: Safari iframe, Firefox
+ * private browsing)
  */
 export function validateIndexedDBOpenable(): Promise<boolean> {
   return new Promise((resolve, reject) => {
@@ -153,12 +188,12 @@ export function validateIndexedDBOpenable(): Promise<boolean> {
       let preExist: boolean = true;
       const DB_CHECK_NAME =
         'validate-browser-context-for-indexeddb-analytics-module';
-      const request = window.indexedDB.open(DB_CHECK_NAME);
+      const request = self.indexedDB.open(DB_CHECK_NAME);
       request.onsuccess = () => {
         request.result.close();
         // delete database only when it doesn't pre-exist
         if (!preExist) {
-          window.indexedDB.deleteDatabase(DB_CHECK_NAME);
+          self.indexedDB.deleteDatabase(DB_CHECK_NAME);
         }
         resolve(true);
       };
@@ -181,7 +216,7 @@ export function validateIndexedDBOpenable(): Promise<boolean> {
  * @return true if cookie is enabled within current browser
  */
 export function areCookiesEnabled(): boolean {
-  if (!navigator || !navigator.cookieEnabled) {
+  if (typeof navigator === 'undefined' || !navigator.cookieEnabled) {
     return false;
   }
   return true;

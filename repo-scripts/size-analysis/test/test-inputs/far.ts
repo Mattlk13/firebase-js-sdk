@@ -18,7 +18,7 @@ import { LogLevel } from '@firebase/logger';
 
 export let basicVarDeclarationExportFar: string;
 export const basicVarStatementExportFar = 'basicVarStatementExportFar';
-export const reExportVarStatmentExportFar = name;
+export const reExportVarStatementExportFar = name;
 
 export enum BasicEnumExportFar {
   DEBUG = 0,
@@ -71,7 +71,7 @@ export function basicUniqueFuncFar(
     return pickedCard;
   }
   // Otherwise just let them pick the card
-  else if (typeof x === 'number') {
+  else {
     return { suit: 'a', card: x % 13 };
   }
 }

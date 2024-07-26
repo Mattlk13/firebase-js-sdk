@@ -27,17 +27,23 @@ import {
   RequestBody,
   RequestEndpoint
 } from './size_report_helper';
+import { existsSync } from 'fs';
 interface ModularExportBinarySizeRequestBody extends RequestBody {
   modules: Report[];
 }
 
 async function generateReport(): Promise<ModularExportBinarySizeRequestBody> {
   let allModulesLocation: string[] = await mapWorkspaceToPackages([
-    `${projectRoot}/packages-exp/*`
+    `${projectRoot}/packages/*`
   ]);
 
   allModulesLocation = allModulesLocation.filter(path => {
-    const json = require(`${path}/package.json`);
+    const pkgJsonPath = `${path}/package.json`;
+    if (!existsSync(pkgJsonPath)) {
+      return false;
+    }
+
+    const json = require(pkgJsonPath);
     return (
       json.name.startsWith('@firebase') &&
       !json.name.includes('-compat') &&
@@ -53,8 +59,13 @@ async function generateReport(): Promise<ModularExportBinarySizeRequestBody> {
 }
 
 async function main(): Promise<void> {
-  const reports: ModularExportBinarySizeRequestBody = await generateReport();
-  console.log(JSON.stringify(reports, null, 4));
-  upload(reports, RequestEndpoint.MODULAR_EXPORT_BINARY_SIZE);
+  try {
+    const reports: ModularExportBinarySizeRequestBody = await generateReport();
+    console.log(JSON.stringify(reports, null, 4));
+    upload(reports, RequestEndpoint.MODULAR_EXPORT_BINARY_SIZE);
+  } catch (e) {
+    console.error(e);
+    process.exit(1);
+  }
 }
 main();

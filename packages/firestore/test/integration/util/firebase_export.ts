@@ -15,106 +15,40 @@
  * limitations under the License.
  */
 
-// Imports firebase via the raw sources and re-exports it.
-// This file exists for two reasons:
-// - It serves as a single entry point to all Firebase types and can return
-//   the leagcy SDK types directly (if `firebase.firestore` exists), or wrapping
-//   types that use the firebase-exp SDK.
-// - It can be replaced by the "<repo-root>/integration/firestore" test suite
-//   with a reference to the minified sources.
-//
-// If you change any exports in this file, you need to also adjust
-// "integration/firestore/firebase_export.ts".
+// Imports firebase via the raw sources and re-exports it. The
+// "<repo-root>/integration/firestore" test suite replaces this file with a
+// reference to the minified sources. If you change any exports in this file,
+// you need to also adjust "integration/firestore/firebase_export.ts".
 
-import * as firestore from '@firebase/firestore-types';
+import { FirebaseApp, initializeApp } from '@firebase/app';
 
-import firebase from '@firebase/app';
-import * as exp from '../../../exp/test/shim';
-import {
-  FirebaseApp as FirebaseAppShim,
-  FirebaseFirestore as FirestoreShim
-} from '../../../exp/test/shim';
-import {
-  getFirestore,
-  initializeFirestore
-} from '../../../exp/src/api/database';
-// eslint-disable-next-line import/no-extraneous-dependencies
-import { initializeApp } from '@firebase/app-exp';
-import { FirebaseApp } from '@firebase/app-types';
-
-/**
- * Detects whether we are running against the functionial (tree-shakeable)
- * Firestore API. Used to exclude some tests, e.g. those that validate invalid
- * TypeScript input.
- */
-export function usesFunctionalApi(): boolean {
-  // Use the firebase namespace to detect if `firebase.firestore` has been
-  // registered, which is only registered in the classic version of Firestore.
-  return !('firestore' in firebase);
-}
+import { Firestore, initializeFirestore } from '../../../src';
+import { PrivateSettings } from '../../../src/lite-api/settings';
 
 // TODO(dimond): Right now we create a new app and Firestore instance for
 // every test and never clean them up. We may need to revisit.
 let appCount = 0;
 
-/**
- * Creates a new test instance of Firestore using either firebase.firestore()
- * or `initializeFirestore` from the modular API.
- */
-export function newTestFirestore(
-  projectId: string,
-  nameOrApp?: string | FirebaseApp | FirebaseAppShim,
-  settings?: firestore.Settings
-): firestore.FirebaseFirestore {
-  if (nameOrApp === undefined) {
-    nameOrApp = 'test-app-' + appCount++;
+export function newTestApp(projectId: string, appName?: string): FirebaseApp {
+  if (appName === undefined) {
+    appName = 'test-app-' + appCount++;
   }
-
-  if (usesFunctionalApi()) {
-    const app =
-      typeof nameOrApp === 'string'
-        ? initializeApp({ apiKey: 'fake-api-key', projectId }, nameOrApp)
-        : (nameOrApp as FirebaseAppShim)._delegate;
-    const firestore = settings
-      ? initializeFirestore(app, settings)
-      : getFirestore(app);
-    return new FirestoreShim(firestore);
-  } else {
-    const app =
-      typeof nameOrApp === 'string'
-        ? firebase.initializeApp(
-            { apiKey: 'fake-api-key', projectId },
-            nameOrApp
-          )
-        : nameOrApp;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const firestore = (firebase as any).firestore(app);
-    if (settings) {
-      firestore.settings(settings);
-    }
-    return firestore;
-  }
+  return initializeApp(
+    {
+      apiKey: 'fake-api-key',
+      projectId
+    },
+    appName
+  );
 }
 
-// We only register firebase.firestore if the tests are run against the
-// legacy SDK. To prevent a compile-time error with the firestore-exp
-// SDK, we cast to `any`.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const legacyNamespace = (firebase as any).firestore;
+export function newTestFirestore(
+  app: FirebaseApp,
+  settings?: PrivateSettings,
+  dbName?: string
+): Firestore {
+  return initializeFirestore(app, settings || {}, dbName);
+}
 
-const Firestore = usesFunctionalApi()
-  ? exp.FirebaseFirestore
-  : legacyNamespace.FirebaseFirestore;
-const FieldPath = usesFunctionalApi()
-  ? exp.FieldPath
-  : legacyNamespace.FieldPath;
-const Timestamp = usesFunctionalApi()
-  ? exp.Timestamp
-  : legacyNamespace.Timestamp;
-const GeoPoint = usesFunctionalApi() ? exp.GeoPoint : legacyNamespace.GeoPoint;
-const FieldValue = usesFunctionalApi()
-  ? exp.FieldValue
-  : legacyNamespace.FieldValue;
-const Blob = usesFunctionalApi() ? exp.Blob : legacyNamespace.Blob;
-
-export { Firestore, FieldValue, FieldPath, Timestamp, Blob, GeoPoint };
+export * from '../../../src';
+export { PrivateSettings };

@@ -16,9 +16,20 @@
  */
 
 import { expect } from 'chai';
-import { EmptyCredentialsProvider, Token } from '../../../src/api/credentials';
+
+import {
+  EmptyAuthCredentialsProvider,
+  Token
+} from '../../../src/api/credentials';
 import { SnapshotVersion } from '../../../src/core/snapshot_version';
+import { Target } from '../../../src/core/target';
+import { TargetData, TargetPurpose } from '../../../src/local/target_data';
 import { MutationResult } from '../../../src/model/mutation';
+import { ResourcePath } from '../../../src/model/path';
+import {
+  newPersistentWatchStream,
+  newPersistentWriteStream
+} from '../../../src/remote/datastore';
 import {
   PersistentListenStream,
   PersistentWriteStream,
@@ -30,15 +41,15 @@ import {
   ExistenceFilterChange,
   WatchTargetChange
 } from '../../../src/remote/watch_change';
-import { AsyncQueue, TimerId } from '../../../src/util/async_queue';
+import { TimerId } from '../../../src/util/async_queue';
+import {
+  AsyncQueueImpl,
+  newAsyncQueue
+} from '../../../src/util/async_queue_impl';
 import { Code, FirestoreError } from '../../../src/util/error';
 import { Deferred } from '../../../src/util/promise';
 import { setMutation } from '../../util/helpers';
 import { withTestDatastore } from '../util/internal_helpers';
-import {
-  newPersistentWatchStream,
-  newPersistentWriteStream
-} from '../../../src/remote/datastore';
 
 /**
  * StreamEventType combines the events that can be observed by the
@@ -49,7 +60,8 @@ type StreamEventType =
   | 'mutationResult'
   | 'watchChange'
   | 'open'
-  | 'close';
+  | 'close'
+  | 'connected';
 
 const SINGLE_MUTATION = [setMutation('docs/1', { foo: 'bar' })];
 
@@ -109,6 +121,10 @@ class StreamStatusListener implements WatchStreamListener, WriteStreamListener {
     return this.resolvePending('watchChange');
   }
 
+  onConnected(): Promise<void> {
+    return this.resolvePending('connected');
+  }
+
   onOpen(): Promise<void> {
     return this.resolvePending('open');
   }
@@ -140,9 +156,17 @@ describe('Watch Stream', () => {
       });
     });
   });
+
+  it('gets connected event before first message', () => {
+    return withTestWatchStream(async (watchStream, streamListener) => {
+      await streamListener.awaitCallback('open');
+      watchStream.watch(sampleTargetData());
+      await streamListener.awaitCallback('connected');
+    });
+  });
 });
 
-class MockCredentialsProvider extends EmptyCredentialsProvider {
+class MockAuthCredentialsProvider extends EmptyAuthCredentialsProvider {
   private states: string[] = [];
 
   get observedStates(): string[] {
@@ -182,6 +206,7 @@ describe('Write Stream', () => {
         'Handshake must be complete before writing mutations'
       );
       writeStream.writeHandshake();
+      await streamListener.awaitCallback('connected');
       await streamListener.awaitCallback('handshakeComplete');
 
       // Now writes should succeed
@@ -197,9 +222,10 @@ describe('Write Stream', () => {
     return withTestWriteStream((writeStream, streamListener, queue) => {
       return streamListener
         .awaitCallback('open')
-        .then(() => {
+        .then(async () => {
           writeStream.writeHandshake();
-          return streamListener.awaitCallback('handshakeComplete');
+          await streamListener.awaitCallback('connected');
+          await streamListener.awaitCallback('handshakeComplete');
         })
         .then(() => {
           writeStream.markIdle();
@@ -220,6 +246,7 @@ describe('Write Stream', () => {
     return withTestWriteStream(async (writeStream, streamListener, queue) => {
       await streamListener.awaitCallback('open');
       writeStream.writeHandshake();
+      await streamListener.awaitCallback('connected');
       await streamListener.awaitCallback('handshakeComplete');
 
       // Mark the stream idle, but immediately cancel the idle timer by issuing another write.
@@ -235,7 +262,7 @@ describe('Write Stream', () => {
   });
 
   it('force refreshes auth token on receiving unauthenticated error', () => {
-    const credentials = new MockCredentialsProvider();
+    const credentials = new MockAuthCredentialsProvider();
 
     return withTestWriteStream(async (writeStream, streamListener) => {
       await streamListener.awaitCallback('open');
@@ -269,16 +296,34 @@ describe('Write Stream', () => {
   });
 });
 
+it('token is not invalidated once the stream is healthy', () => {
+  const credentials = new MockAuthCredentialsProvider();
+
+  return withTestWriteStream(async (writeStream, streamListener, queue) => {
+    await streamListener.awaitCallback('open');
+
+    await queue.runAllDelayedOperationsUntil(TimerId.HealthCheckTimeout);
+
+    // Simulate callback from GRPC with an unauthenticated error -- this should
+    // NOT invalidate the token.
+    await writeStream.handleStreamClose(
+      new FirestoreError(Code.UNAUTHENTICATED, '')
+    );
+    await streamListener.awaitCallback('close');
+    expect(credentials.observedStates).to.deep.equal(['getToken']);
+  }, credentials);
+});
+
 export async function withTestWriteStream(
   fn: (
     writeStream: PersistentWriteStream,
     streamListener: StreamStatusListener,
-    queue: AsyncQueue
+    queue: AsyncQueueImpl
   ) => Promise<void>,
-  credentialsProvider = new EmptyCredentialsProvider()
+  credentialsProvider = new EmptyAuthCredentialsProvider()
 ): Promise<void> {
   await withTestDatastore(async datastore => {
-    const queue = new AsyncQueue();
+    const queue = newAsyncQueue() as AsyncQueueImpl;
     const streamListener = new StreamStatusListener();
     const writeStream = newPersistentWriteStream(
       datastore,
@@ -298,7 +343,7 @@ export async function withTestWatchStream(
   ) => Promise<void>
 ): Promise<void> {
   await withTestDatastore(async datastore => {
-    const queue = new AsyncQueue();
+    const queue = newAsyncQueue();
     const streamListener = new StreamStatusListener();
     const watchStream = newPersistentWatchStream(
       datastore,
@@ -309,4 +354,17 @@ export async function withTestWatchStream(
     await fn(watchStream, streamListener);
     streamListener.verifyNoPendingCallbacks();
   });
+}
+
+function sampleTargetData(): TargetData {
+  const target: Target = {
+    path: ResourcePath.emptyPath(),
+    collectionGroup: null,
+    orderBy: [],
+    filters: [],
+    limit: null,
+    startAt: null,
+    endAt: null
+  };
+  return new TargetData(target, 1, TargetPurpose.Listen, 1);
 }

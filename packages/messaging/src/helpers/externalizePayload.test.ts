@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-import { MessagePayload } from '@firebase/messaging-types';
+import { MessagePayload } from '../interfaces/public-types';
 import { MessagePayloadInternal } from '../interfaces/internal-message-payload';
 import { expect } from 'chai';
 import { externalizePayload } from './externalizePayload';
@@ -26,17 +26,33 @@ describe('externalizePayload', () => {
       notification: {
         title: 'title',
         body: 'body',
-        image: 'image'
+        image: 'image',
+        icon: 'icon',
+        // eslint-disable-next-line camelcase
+        click_action: 'https://www.self_orgin.com'
       },
       from: 'from',
       // eslint-disable-next-line camelcase
-      collapse_key: 'collapse'
+      collapse_key: 'collapse',
+      // eslint-disable-next-line camelcase
+      fcmMessageId: 'mid',
+      // eslint-disable-next-line camelcase
+      productId: 123
     };
 
     const payload: MessagePayload = {
-      notification: { title: 'title', body: 'body', image: 'image' },
+      notification: {
+        title: 'title',
+        body: 'body',
+        image: 'image',
+        icon: 'icon'
+      },
       from: 'from',
-      collapseKey: 'collapse'
+      collapseKey: 'collapse',
+      messageId: 'mid',
+      fcmOptions: {
+        link: 'https://www.self_orgin.com'
+      }
     };
     expect(externalizePayload(internalPayload)).to.deep.equal(payload);
   });
@@ -50,13 +66,18 @@ describe('externalizePayload', () => {
       },
       from: 'from',
       // eslint-disable-next-line camelcase
-      collapse_key: 'collapse'
+      collapse_key: 'collapse',
+      // eslint-disable-next-line camelcase
+      fcmMessageId: 'mid',
+      // eslint-disable-next-line camelcase
+      productId: 123
     };
 
     const payload: MessagePayload = {
       data: { foo: 'foo', bar: 'bar', baz: 'baz' },
       from: 'from',
-      collapseKey: 'collapse'
+      collapseKey: 'collapse',
+      messageId: 'mid'
     };
     expect(externalizePayload(internalPayload)).to.deep.equal(payload);
   });
@@ -66,7 +87,8 @@ describe('externalizePayload', () => {
       notification: {
         title: 'title',
         body: 'body',
-        image: 'image'
+        image: 'image',
+        icon: 'icon'
       },
       data: {
         foo: 'foo',
@@ -74,20 +96,25 @@ describe('externalizePayload', () => {
         baz: 'baz'
       },
       fcmOptions: {
-        link: 'link',
+        link: 'https://www.self_orgin.com',
         // eslint-disable-next-line camelcase
         analytics_label: 'label'
       },
       from: 'from',
       // eslint-disable-next-line camelcase
-      collapse_key: 'collapse'
+      collapse_key: 'collapse',
+      // eslint-disable-next-line camelcase
+      fcmMessageId: 'mid',
+      // eslint-disable-next-line camelcase
+      productId: 123
     };
 
     const payload: MessagePayload = {
       notification: {
         title: 'title',
         body: 'body',
-        image: 'image'
+        image: 'image',
+        icon: 'icon'
       },
       data: {
         foo: 'foo',
@@ -95,11 +122,12 @@ describe('externalizePayload', () => {
         baz: 'baz'
       },
       fcmOptions: {
-        link: 'link',
+        link: 'https://www.self_orgin.com',
         analyticsLabel: 'label'
       },
       from: 'from',
-      collapseKey: 'collapse'
+      collapseKey: 'collapse',
+      messageId: 'mid'
     };
     expect(externalizePayload(internalPayload)).to.deep.equal(payload);
   });

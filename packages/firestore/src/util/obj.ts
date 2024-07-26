@@ -21,7 +21,7 @@ export interface Dict<V> {
   [stringKey: string]: V;
 }
 
-export function objectSize<V>(obj: object): number {
+export function objectSize(obj: object): number {
   let count = 0;
   for (const key in obj) {
     if (Object.prototype.hasOwnProperty.call(obj, key)) {
@@ -32,7 +32,7 @@ export function objectSize<V>(obj: object): number {
 }
 
 export function forEach<V>(
-  obj: Dict<V>,
+  obj: Dict<V> | undefined,
   fn: (key: string, val: V) => void
 ): void {
   for (const key in obj) {
@@ -40,6 +40,19 @@ export function forEach<V>(
       fn(key, obj[key]);
     }
   }
+}
+
+export function mapToArray<V, R>(
+  obj: Dict<V>,
+  fn: (element: V, key: string, obj: Dict<V>) => R
+): R[] {
+  const result: R[] = [];
+  for (const key in obj) {
+    if (Object.prototype.hasOwnProperty.call(obj, key)) {
+      result.push(fn(obj[key], key, obj));
+    }
+  }
+  return result;
 }
 
 export function isEmpty<V>(obj: Dict<V>): boolean {

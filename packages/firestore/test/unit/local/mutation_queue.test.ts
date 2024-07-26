@@ -16,11 +16,13 @@
  */
 
 import { expect } from 'chai';
+
 import { User } from '../../../src/auth/user';
 import { IndexedDbPersistence } from '../../../src/local/indexeddb_persistence';
 import { Persistence } from '../../../src/local/persistence';
 import { documentKeySet } from '../../../src/model/collections';
 import { MutationBatch } from '../../../src/model/mutation_batch';
+import { addEqualityMatcher } from '../../util/equality_matcher';
 import {
   expectEqualArrays,
   key,
@@ -29,7 +31,6 @@ import {
   setMutation
 } from '../../util/helpers';
 
-import { addEqualityMatcher } from '../../util/equality_matcher';
 import * as persistenceHelpers from './persistence_test_helpers';
 import { TestMutationQueue } from './test_mutation_queue';
 
@@ -70,7 +71,10 @@ function genericMutationQueueTests(): void {
   beforeEach(() => {
     mutationQueue = new TestMutationQueue(
       persistence,
-      persistence.getMutationQueue(new User('user'))
+      persistence.getMutationQueue(
+        new User('user'),
+        persistence.getIndexManager(new User('user'))
+      )
     );
   });
 
@@ -108,9 +112,9 @@ function genericMutationQueueTests(): void {
   /**
    * Removes the first n entries from the given batches and returns them.
    *
-   * @param n The number of batches to remove.
-   * @param batches The array to mutate, removing entries from it.
-   * @return A new array containing all the entries that were removed from
+   * @param n - The number of batches to remove.
+   * @param batches - The array to mutate, removing entries from it.
+   * @returns A new array containing all the entries that were removed from
    * batches.
    */
   async function removeFirstBatches(
@@ -146,7 +150,7 @@ function genericMutationQueueTests(): void {
   });
 
   it('can lookup mutation batch', async () => {
-    // Searching on an empty queue should not find a non-existent batch
+    // Searching on an empty queue should not find a nonexistent batch
     let notFound = await mutationQueue.lookupMutationBatch(42);
     expect(notFound).to.be.null;
 
@@ -165,7 +169,7 @@ function genericMutationQueueTests(): void {
       expect(found!.batchId).to.equal(batch.batchId);
     }
 
-    // Even on a nonempty queue searching should not find a non-existent batch
+    // Even on a nonempty queue searching should not find a nonexistent batch
     notFound = await mutationQueue.lookupMutationBatch(42);
     expect(notFound).to.be.null;
   });
@@ -221,9 +225,10 @@ function genericMutationQueueTests(): void {
       batches.push(batch);
     }
     const expected = [batches[1], batches[2]];
-    const matches = await mutationQueue.getAllMutationBatchesAffectingDocumentKey(
-      key('foo/bar')
-    );
+    const matches =
+      await mutationQueue.getAllMutationBatchesAffectingDocumentKey(
+        key('foo/bar')
+      );
     expectEqualArrays(matches, expected);
   });
 
@@ -243,9 +248,10 @@ function genericMutationQueueTests(): void {
       batches.push(batch);
     }
     const expected = [batches[1], batches[2], batches[4]];
-    const matches = await mutationQueue.getAllMutationBatchesAffectingDocumentKeys(
-      documentKeySet().add(key('foo/bar')).add(key('foo/baz'))
-    );
+    const matches =
+      await mutationQueue.getAllMutationBatchesAffectingDocumentKeys(
+        documentKeySet().add(key('foo/bar')).add(key('foo/baz'))
+      );
     expectEqualArrays(matches, expected);
   });
 

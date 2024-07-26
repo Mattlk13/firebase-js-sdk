@@ -17,24 +17,34 @@
 
 import { expect } from 'chai';
 
-import { Blob } from '../../../src/api/blob';
-import { DocumentReference } from '../../../src/api/database';
-import { FieldValue } from '../../../src/api/field_value';
-import { GeoPoint } from '../../../src/api/geo_point';
-import { Timestamp } from '../../../src/api/timestamp';
+import {
+  arrayRemove,
+  arrayUnion,
+  Bytes,
+  DocumentReference,
+  GeoPoint,
+  increment,
+  refEqual,
+  serverTimestamp,
+  Timestamp
+} from '../../../src';
+import { ExpUserDataWriter } from '../../../src/api/reference_impl';
 import { DatabaseId } from '../../../src/core/database_info';
 import {
   ArrayContainsAnyFilter,
   ArrayContainsFilter,
-  Direction,
+  CompositeFilter,
   FieldFilter,
+  Filter,
   filterEquals,
   InFilter,
   KeyFieldFilter,
-  LimitType,
   NotInFilter,
-  Operator,
-  OrderBy,
+  Operator
+} from '../../../src/core/filter';
+import { Direction, OrderBy } from '../../../src/core/order_by';
+import {
+  LimitType,
   queryToTarget,
   queryWithEndAt,
   queryWithLimit,
@@ -42,10 +52,11 @@ import {
 } from '../../../src/core/query';
 import { SnapshotVersion } from '../../../src/core/snapshot_version';
 import { Target, targetEquals, TargetImpl } from '../../../src/core/target';
+import { parseQueryValue } from '../../../src/lite-api/user_data_reader';
 import { TargetData, TargetPurpose } from '../../../src/local/target_data';
+import { FieldMask } from '../../../src/model/field_mask';
 import {
   DeleteMutation,
-  FieldMask,
   Mutation,
   mutationEquals,
   Precondition,
@@ -82,14 +93,18 @@ import {
   toQueryTarget,
   toTarget,
   toUnaryOrFieldFilter,
-  toVersion
+  toVersion,
+  fromCompositeFilter,
+  toCompositeFilter
 } from '../../../src/remote/serializer';
 import {
   DocumentWatchChange,
   WatchTargetChange,
   WatchTargetChangeState
 } from '../../../src/remote/watch_change';
+import { ByteString } from '../../../src/util/byte_string';
 import { Code, FirestoreError } from '../../../src/util/error';
+import { firestore } from '../../util/api_helpers';
 import { addEqualityMatcher } from '../../util/equality_matcher';
 import {
   bound,
@@ -99,6 +114,8 @@ import {
   doc,
   field,
   filter,
+  andFilter,
+  orFilter,
   key,
   orderBy,
   patchMutation,
@@ -106,19 +123,16 @@ import {
   ref,
   setMutation,
   testUserDataReader,
-  testUserDataWriter,
-  transformMutation,
   version,
   wrap,
   wrapObject
 } from '../../util/helpers';
 
-import { ByteString } from '../../../src/util/byte_string';
-import { parseQueryValue } from '../../../src/api/user_data_reader';
-
-const userDataWriter = testUserDataWriter();
+const userDataWriter = new ExpUserDataWriter(firestore());
 const protobufJsonReader = testUserDataReader(/* useProto3Json= */ true);
 const protoJsReader = testUserDataReader(/* useProto3Json= */ false);
+
+const protoCompositeFilterOrOp: api.CompositeFilterOp = 'OR';
 
 /**
  * Runs the serializer test with an optional ProtobufJS verification step
@@ -177,15 +191,14 @@ export function serializerTest(
           value
         );
         expect(actualJsonProto).to.deep.equal({ [valueType]: jsonValue });
-        const actualReturnFieldValue = userDataWriter.convertValue(
-          actualJsonProto
-        );
+        const actualReturnFieldValue =
+          userDataWriter.convertValue(actualJsonProto);
 
         if (
           actualReturnFieldValue instanceof DocumentReference &&
           value instanceof DocumentReference
         ) {
-          expect(actualReturnFieldValue.isEqual(value)).to.be.true;
+          expect(refEqual(actualReturnFieldValue, value)).to.be.true;
         } else {
           expect(actualReturnFieldValue).to.deep.equal(value);
         }
@@ -197,9 +210,8 @@ export function serializerTest(
           value
         );
         expect(actualProtoJsProto).to.deep.equal({ [valueType]: protoJsValue });
-        const actualProtoJsReturnFieldValue = userDataWriter.convertValue(
-          actualProtoJsProto
-        );
+        const actualProtoJsReturnFieldValue =
+          userDataWriter.convertValue(actualProtoJsProto);
         expect(actualProtoJsReturnFieldValue).to.deep.equal(value);
 
         // If we're using protobufJs JSON (not Proto3Json), then round-trip through protobufjs.
@@ -310,8 +322,8 @@ export function serializerTest(
 
       it('converts TimestampValue from proto', () => {
         const examples = [
-          new Date(Date.UTC(2016, 0, 2, 10, 20, 50, 850)),
-          new Date(Date.UTC(2016, 5, 17, 10, 50, 15, 0))
+          new Timestamp(1451730050, 850000000),
+          new Timestamp(1466160615, 0)
         ];
 
         const expectedJson = [
@@ -339,25 +351,25 @@ export function serializerTest(
           userDataWriter.convertValue({
             timestampValue: '2017-03-07T07:42:58.916123456Z'
           })
-        ).to.deep.equal(new Timestamp(1488872578, 916123456).toDate());
+        ).to.deep.equal(new Timestamp(1488872578, 916123456));
 
         expect(
           userDataWriter.convertValue({
             timestampValue: '2017-03-07T07:42:58.916123Z'
           })
-        ).to.deep.equal(new Timestamp(1488872578, 916123000).toDate());
+        ).to.deep.equal(new Timestamp(1488872578, 916123000));
 
         expect(
           userDataWriter.convertValue({
             timestampValue: '2017-03-07T07:42:58.916Z'
           })
-        ).to.deep.equal(new Timestamp(1488872578, 916000000).toDate());
+        ).to.deep.equal(new Timestamp(1488872578, 916000000));
 
         expect(
           userDataWriter.convertValue({
             timestampValue: '2017-03-07T07:42:58Z'
           })
-        ).to.deep.equal(new Timestamp(1488872578, 0).toDate());
+        ).to.deep.equal(new Timestamp(1488872578, 0));
       });
 
       it('converts TimestampValue to string (useProto3Json=true)', () => {
@@ -412,7 +424,7 @@ export function serializerTest(
         const bytes = new Uint8Array([0, 1, 2, 3, 4, 5]);
 
         verifyFieldValueRoundTrip({
-          value: Blob.fromUint8Array(bytes),
+          value: Bytes.fromUint8Array(bytes),
           valueType: 'bytesValue',
           jsonValue: 'AAECAwQF',
           protoJsValue: bytes
@@ -661,66 +673,104 @@ export function serializerTest(
         verifyMutation(mutation, proto);
       });
 
-      it('TransformMutation (ServerTimestamp transform)', () => {
-        const mutation = transformMutation('baz/quux', {
-          a: FieldValue.serverTimestamp(),
-          'bar.baz': FieldValue.serverTimestamp()
+      it('ServerTimestamp transform', () => {
+        const mutation = setMutation('baz/quux', {
+          a: serverTimestamp(),
+          'bar': serverTimestamp()
         });
         const proto = {
-          transform: {
-            document: toName(s, mutation.key),
-            fieldTransforms: [
-              { fieldPath: 'a', setToServerValue: 'REQUEST_TIME' },
-              { fieldPath: 'bar.baz', setToServerValue: 'REQUEST_TIME' }
-            ]
-          },
-          currentDocument: { exists: true }
+          update: toMutationDocument(s, mutation.key, mutation.value),
+          updateTransforms: [
+            { fieldPath: 'a', setToServerValue: 'REQUEST_TIME' },
+            { fieldPath: 'bar', setToServerValue: 'REQUEST_TIME' }
+          ]
         };
         verifyMutation(mutation, proto);
+
+        const mutation2 = setMutation('baz/quux', {
+          a: serverTimestamp()
+        });
+        const proto2 = {
+          update: toMutationDocument(s, mutation2.key, mutation2.value),
+          updateTransforms: [
+            { fieldPath: 'a', setToServerValue: 'REQUEST_TIME' }
+          ]
+        };
+        verifyMutation(mutation2, proto2);
       });
 
-      it('TransformMutation (Numeric Add transform)', () => {
-        const mutation = transformMutation('baz/quux', {
-          integer: FieldValue.increment(42),
-          double: FieldValue.increment(13.37)
+      it('Numeric Add transform', () => {
+        const mutation = setMutation('baz/quux', {
+          integer: increment(42),
+          double: increment(13.37)
         });
         const proto = {
-          transform: {
-            document: toName(s, mutation.key),
-            fieldTransforms: [
-              { fieldPath: 'integer', increment: { integerValue: '42' } },
-              { fieldPath: 'double', increment: { doubleValue: 13.37 } }
-            ]
-          },
-          currentDocument: { exists: true }
+          update: toMutationDocument(s, mutation.key, mutation.value),
+          updateTransforms: [
+            { fieldPath: 'integer', increment: { integerValue: '42' } },
+            { fieldPath: 'double', increment: { doubleValue: 13.37 } }
+          ]
         };
         verifyMutation(mutation, proto);
+
+        const mutation2 = setMutation('baz/quux', {
+          integer: increment(42),
+          double: increment(13.37)
+        });
+        const proto2 = {
+          update: toMutationDocument(s, mutation2.key, mutation2.value),
+          updateTransforms: [
+            { fieldPath: 'integer', increment: { integerValue: '42' } },
+            { fieldPath: 'double', increment: { doubleValue: 13.37 } }
+          ]
+        };
+        verifyMutation(mutation2, proto2);
       });
 
-      it('TransformMutation (Array transforms)', () => {
-        const mutation = transformMutation('docs/1', {
-          a: FieldValue.arrayUnion('a', 2),
-          'bar.baz': FieldValue.arrayRemove({ x: 1 })
+      it('Array transforms', () => {
+        const mutation = patchMutation('docs/1', {
+          a: arrayUnion('a', 2),
+          'bar.baz': arrayRemove({ x: 1 })
         });
-        const proto: api.Write = {
-          transform: {
-            document: toName(s, mutation.key),
-            fieldTransforms: [
-              {
-                fieldPath: 'a',
-                appendMissingElements: {
-                  values: [wrap('a'), wrap(2)]
-                }
-              },
-              {
-                fieldPath: 'bar.baz',
-                removeAllFromArray: { values: [wrap({ x: 1 })] }
+        const proto = {
+          update: toMutationDocument(s, mutation.key, mutation.data),
+          updateMask: toDocumentMask(mutation.fieldMask),
+          updateTransforms: [
+            {
+              fieldPath: 'a',
+              appendMissingElements: {
+                values: [wrap('a'), wrap(2)]
               }
-            ]
-          },
+            },
+            {
+              fieldPath: 'bar.baz',
+              removeAllFromArray: { values: [wrap({ x: 1 })] }
+            }
+          ],
           currentDocument: { exists: true }
         };
         verifyMutation(mutation, proto);
+
+        const mutation2 = setMutation('docs/1', {
+          a: arrayUnion('a', 2),
+          bar: arrayRemove({ x: 1 })
+        });
+        const proto2 = {
+          update: toMutationDocument(s, mutation2.key, mutation2.value),
+          updateTransforms: [
+            {
+              fieldPath: 'a',
+              appendMissingElements: {
+                values: [wrap('a'), wrap(2)]
+              }
+            },
+            {
+              fieldPath: 'bar',
+              removeAllFromArray: { values: [wrap({ x: 1 })] }
+            }
+          ]
+        };
+        verifyMutation(mutation2, proto2);
       });
 
       it('SetMutation with precondition', () => {
@@ -754,18 +804,19 @@ export function serializerTest(
     });
 
     it('toDocument() / fromDocument', () => {
-      const d = doc('foo/bar', 42, { a: 5, b: 'b' });
+      const d = doc('foo/bar', 42, { a: 5, b: 'b' }, /* createTime */ 12);
       const proto = {
         name: toName(s, d.key),
-        fields: d.toProto().mapValue.fields,
-        updateTime: toVersion(s, d.version)
+        fields: d.data.value.mapValue.fields,
+        updateTime: toVersion(s, d.version),
+        createTime: toVersion(s, d.createTime)
       };
       const serialized = toDocument(s, d);
       expect(serialized).to.deep.equal(proto);
       expect(fromDocument(s, serialized, undefined).isEqual(d)).to.equal(true);
     });
 
-    describe('to/from FieldFilter', () => {
+    describe('to/from UnaryOrFieldFilter', () => {
       addEqualityMatcher({ equalsFn: filterEquals, forType: FieldFilter });
 
       it('makes dotted-property names', () => {
@@ -938,6 +989,29 @@ export function serializerTest(
         expect(roundtripped).to.be.instanceof(NotInFilter);
       });
 
+      it('converts not-in with null', () => {
+        const input = filter('field', 'not-in', [null]);
+        const actual = toUnaryOrFieldFilter(input);
+        expect(actual).to.deep.equal({
+          fieldFilter: {
+            field: { fieldPath: 'field' },
+            op: 'NOT_IN',
+            value: {
+              arrayValue: {
+                values: [
+                  {
+                    nullValue: 'NULL_VALUE'
+                  }
+                ]
+              }
+            }
+          }
+        });
+        const roundtripped = fromFieldFilter(actual);
+        expect(roundtripped).to.deep.equal(input);
+        expect(roundtripped).to.be.instanceof(NotInFilter);
+      });
+
       it('converts array-contains-any', () => {
         const input = filter('field', 'array-contains-any', [42]);
         const actual = toUnaryOrFieldFilter(input);
@@ -1014,6 +1088,174 @@ export function serializerTest(
       });
     });
 
+    describe('to/from CompositeFilter', () => {
+      addEqualityMatcher({ equalsFn: filterEquals, forType: Filter });
+
+      /* eslint-disable no-restricted-properties */
+      it('converts deep collections', () => {
+        const input = orFilter(
+          filter('prop', '<', 42),
+          andFilter(
+            filter('author', '==', 'ehsann'),
+            filter('tags', 'array-contains', 'pending'),
+            orFilter(filter('version', '==', 4), filter('version', '==', NaN))
+          )
+        );
+
+        // Encode
+        const actual = toCompositeFilter(input);
+
+        const propProtoFilter = {
+          fieldFilter: {
+            field: { fieldPath: 'prop' },
+            op: 'LESS_THAN',
+            value: { integerValue: '42' }
+          }
+        };
+
+        const authorProtoFilter = {
+          fieldFilter: {
+            field: { fieldPath: 'author' },
+            op: 'EQUAL',
+            value: { stringValue: 'ehsann' }
+          }
+        };
+
+        const tagsProtoFilter = {
+          fieldFilter: {
+            field: { fieldPath: 'tags' },
+            op: 'ARRAY_CONTAINS',
+            value: { stringValue: 'pending' }
+          }
+        };
+
+        const versionProtoFilter = {
+          fieldFilter: {
+            field: { fieldPath: 'version' },
+            op: 'EQUAL',
+            value: { integerValue: '4' }
+          }
+        };
+
+        const nanVersionProtoFilter = {
+          unaryFilter: {
+            field: { fieldPath: 'version' },
+            op: 'IS_NAN'
+          }
+        };
+
+        const innerOrProtoFilter = {
+          compositeFilter: {
+            op: protoCompositeFilterOrOp,
+            filters: [versionProtoFilter, nanVersionProtoFilter]
+          }
+        };
+
+        const innerAndProtoFilter = {
+          compositeFilter: {
+            op: 'AND',
+            filters: [authorProtoFilter, tagsProtoFilter, innerOrProtoFilter]
+          }
+        };
+
+        expect(actual).to.deep.equal({
+          compositeFilter: {
+            op: protoCompositeFilterOrOp,
+            filters: [propProtoFilter, innerAndProtoFilter]
+          }
+        });
+
+        // Decode
+        const roundtripped = fromCompositeFilter(actual);
+        expect(roundtripped).to.deep.equal(input);
+        expect(roundtripped).to.be.instanceof(CompositeFilter);
+      });
+    });
+
+    describe('to/from CompositeFilter', () => {
+      addEqualityMatcher({ equalsFn: filterEquals, forType: Filter });
+
+      /* eslint-disable no-restricted-properties */
+      it('converts deep collections', () => {
+        const input = orFilter(
+          filter('prop', '<', 42),
+          andFilter(
+            filter('author', '==', 'ehsann'),
+            filter('tags', 'array-contains', 'pending'),
+            orFilter(filter('version', '==', 4), filter('version', '==', NaN))
+          )
+        );
+
+        // Encode
+        const actual = toCompositeFilter(input);
+
+        const propProtoFilter = {
+          fieldFilter: {
+            field: { fieldPath: 'prop' },
+            op: 'LESS_THAN',
+            value: { integerValue: '42' }
+          }
+        };
+
+        const authorProtoFilter = {
+          fieldFilter: {
+            field: { fieldPath: 'author' },
+            op: 'EQUAL',
+            value: { stringValue: 'ehsann' }
+          }
+        };
+
+        const tagsProtoFilter = {
+          fieldFilter: {
+            field: { fieldPath: 'tags' },
+            op: 'ARRAY_CONTAINS',
+            value: { stringValue: 'pending' }
+          }
+        };
+
+        const versionProtoFilter = {
+          fieldFilter: {
+            field: { fieldPath: 'version' },
+            op: 'EQUAL',
+            value: { integerValue: '4' }
+          }
+        };
+
+        const nanVersionProtoFilter = {
+          unaryFilter: {
+            field: { fieldPath: 'version' },
+            op: 'IS_NAN'
+          }
+        };
+
+        const innerOrProtoFilter = {
+          compositeFilter: {
+            op: protoCompositeFilterOrOp,
+            filters: [versionProtoFilter, nanVersionProtoFilter]
+          }
+        };
+
+        const innerAndProtoFilter = {
+          compositeFilter: {
+            op: 'AND',
+            filters: [authorProtoFilter, tagsProtoFilter, innerOrProtoFilter]
+          }
+        };
+
+        expect(actual).to.deep.equal({
+          compositeFilter: {
+            op: protoCompositeFilterOrOp,
+            filters: [propProtoFilter, innerAndProtoFilter]
+          }
+        });
+
+        // Decode
+        const roundtripped = fromCompositeFilter(actual);
+        expect(roundtripped).to.deep.equal(input);
+        expect(roundtripped).to.be.instanceof(CompositeFilter);
+      });
+    });
+
     it('encodes listen request labels', () => {
       const target = queryToTarget(query('collection/key'));
       let targetData = new TargetData(target, 2, TargetPurpose.Listen, 3);
@@ -1069,7 +1311,9 @@ export function serializerTest(
           },
           targetId: 1
         });
-        expect(fromQueryTarget(toQueryTarget(s, q))).to.deep.equal(q);
+        expect(fromQueryTarget(toQueryTarget(s, q).queryTarget)).to.deep.equal(
+          q
+        );
       });
 
       it('converts nested ancestor queries', () => {
@@ -1091,7 +1335,9 @@ export function serializerTest(
           targetId: 1
         };
         expect(result).to.deep.equal(expected);
-        expect(fromQueryTarget(toQueryTarget(s, q))).to.deep.equal(q);
+        expect(fromQueryTarget(toQueryTarget(s, q).queryTarget)).to.deep.equal(
+          q
+        );
       });
 
       it('converts single filters at first-level collections', () => {
@@ -1124,7 +1370,9 @@ export function serializerTest(
           targetId: 1
         };
         expect(result).to.deep.equal(expected);
-        expect(fromQueryTarget(toQueryTarget(s, q))).to.deep.equal(q);
+        expect(fromQueryTarget(toQueryTarget(s, q).queryTarget)).to.deep.equal(
+          q
+        );
       });
 
       it('converts multiple filters at first-level collections', () => {
@@ -1199,7 +1447,9 @@ export function serializerTest(
           targetId: 1
         };
         expect(result).to.deep.equal(expected);
-        expect(fromQueryTarget(toQueryTarget(s, q))).to.deep.equal(q);
+        expect(fromQueryTarget(toQueryTarget(s, q).queryTarget)).to.deep.equal(
+          q
+        );
       });
 
       it('converts single filters on deeper collections', () => {
@@ -1234,7 +1484,185 @@ export function serializerTest(
           targetId: 1
         };
         expect(result).to.deep.equal(expected);
-        expect(fromQueryTarget(toQueryTarget(s, q))).to.deep.equal(q);
+        expect(fromQueryTarget(toQueryTarget(s, q).queryTarget)).to.deep.equal(
+          q
+        );
+      });
+
+      it('converts multi-layer composite filters with OR at the first layer', () => {
+        const q = queryToTarget(
+          query(
+            'docs',
+            orFilter(
+              filter('prop', '<', 42),
+              filter('name', '==', 'dimond'),
+              andFilter(
+                filter('nan', '==', NaN),
+                filter('null', '==', null),
+                filter('tags', 'array-contains', 'pending')
+              )
+            )
+          )
+        );
+        const result = toTarget(s, wrapTargetData(q));
+        const expected = {
+          query: {
+            parent: 'projects/p/databases/d/documents',
+            structuredQuery: {
+              from: [{ collectionId: 'docs' }],
+              where: {
+                compositeFilter: {
+                  op: protoCompositeFilterOrOp,
+                  filters: [
+                    {
+                      fieldFilter: {
+                        field: { fieldPath: 'prop' },
+                        op: 'LESS_THAN',
+                        value: { integerValue: '42' }
+                      }
+                    },
+                    {
+                      fieldFilter: {
+                        field: { fieldPath: 'name' },
+                        op: 'EQUAL',
+                        value: { stringValue: 'dimond' }
+                      }
+                    },
+                    {
+                      compositeFilter: {
+                        op: 'AND',
+                        filters: [
+                          {
+                            unaryFilter: {
+                              field: { fieldPath: 'nan' },
+                              op: 'IS_NAN'
+                            }
+                          },
+                          {
+                            unaryFilter: {
+                              field: { fieldPath: 'null' },
+                              op: 'IS_NULL'
+                            }
+                          },
+                          {
+                            fieldFilter: {
+                              field: { fieldPath: 'tags' },
+                              op: 'ARRAY_CONTAINS',
+                              value: { stringValue: 'pending' }
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              },
+              orderBy: [
+                {
+                  field: { fieldPath: 'prop' },
+                  direction: 'ASCENDING'
+                },
+                {
+                  field: { fieldPath: DOCUMENT_KEY_NAME },
+                  direction: 'ASCENDING'
+                }
+              ]
+            }
+          },
+          targetId: 1
+        };
+        expect(result).to.deep.equal(expected);
+        expect(fromQueryTarget(toQueryTarget(s, q).queryTarget)).to.deep.equal(
+          q
+        );
+      });
+
+      it('converts multi-layer composite filters with AND at the first layer', () => {
+        const q = queryToTarget(
+          query(
+            'docs',
+            andFilter(
+              filter('prop', '<', 42),
+              filter('name', '==', 'dimond'),
+              orFilter(
+                filter('nan', '==', NaN),
+                filter('null', '==', null),
+                filter('tags', 'array-contains', 'pending')
+              )
+            )
+          )
+        );
+        const result = toTarget(s, wrapTargetData(q));
+        const expected = {
+          query: {
+            parent: 'projects/p/databases/d/documents',
+            structuredQuery: {
+              from: [{ collectionId: 'docs' }],
+              where: {
+                compositeFilter: {
+                  op: 'AND',
+                  filters: [
+                    {
+                      fieldFilter: {
+                        field: { fieldPath: 'prop' },
+                        op: 'LESS_THAN',
+                        value: { integerValue: '42' }
+                      }
+                    },
+                    {
+                      fieldFilter: {
+                        field: { fieldPath: 'name' },
+                        op: 'EQUAL',
+                        value: { stringValue: 'dimond' }
+                      }
+                    },
+                    {
+                      compositeFilter: {
+                        op: protoCompositeFilterOrOp,
+                        filters: [
+                          {
+                            unaryFilter: {
+                              field: { fieldPath: 'nan' },
+                              op: 'IS_NAN'
+                            }
+                          },
+                          {
+                            unaryFilter: {
+                              field: { fieldPath: 'null' },
+                              op: 'IS_NULL'
+                            }
+                          },
+                          {
+                            fieldFilter: {
+                              field: { fieldPath: 'tags' },
+                              op: 'ARRAY_CONTAINS',
+                              value: { stringValue: 'pending' }
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              },
+              orderBy: [
+                {
+                  field: { fieldPath: 'prop' },
+                  direction: 'ASCENDING'
+                },
+                {
+                  field: { fieldPath: DOCUMENT_KEY_NAME },
+                  direction: 'ASCENDING'
+                }
+              ]
+            }
+          },
+          targetId: 1
+        };
+        expect(result).to.deep.equal(expected);
+        expect(fromQueryTarget(toQueryTarget(s, q).queryTarget)).to.deep.equal(
+          q
+        );
       });
 
       it('converts order bys', () => {
@@ -1260,7 +1688,9 @@ export function serializerTest(
           targetId: 1
         };
         expect(result).to.deep.equal(expected);
-        expect(fromQueryTarget(toQueryTarget(s, q))).to.deep.equal(q);
+        expect(fromQueryTarget(toQueryTarget(s, q).queryTarget)).to.deep.equal(
+          q
+        );
       });
 
       it('converts limits', () => {
@@ -1285,7 +1715,9 @@ export function serializerTest(
           targetId: 1
         };
         expect(result).to.deep.equal(expected);
-        expect(fromQueryTarget(toQueryTarget(s, q))).to.deep.equal(q);
+        expect(fromQueryTarget(toQueryTarget(s, q).queryTarget)).to.deep.equal(
+          q
+        );
       });
 
       it('converts startAt/endAt', () => {
@@ -1293,15 +1725,9 @@ export function serializerTest(
           queryWithEndAt(
             queryWithStartAt(
               query('docs'),
-              bound(
-                [[DOCUMENT_KEY_NAME, ref('foo/bar'), 'asc']],
-                /*before=*/ true
-              )
+              bound([ref('foo/bar')], /*inclusive=*/ true)
             ),
-            bound(
-              [[DOCUMENT_KEY_NAME, ref('foo/bar'), 'asc']],
-              /*before=*/ false
-            )
+            bound([ref('foo/bar')], /*inclusive=*/ true)
           )
         );
         const result = toTarget(s, wrapTargetData(q));
@@ -1339,7 +1765,9 @@ export function serializerTest(
           targetId: 1
         };
         expect(result).to.deep.equal(expected);
-        expect(fromQueryTarget(toQueryTarget(s, q))).to.deep.equal(q);
+        expect(fromQueryTarget(toQueryTarget(s, q).queryTarget)).to.deep.equal(
+          q
+        );
       });
 
       it('converts resume tokens', () => {
@@ -1442,10 +1870,10 @@ export function serializerTest(
 
       // TODO(dimond): RPC status cause
       it('converts target change with added', () => {
-        const expected = new WatchTargetChange(WatchTargetChangeState.Added, [
-          1,
-          4
-        ]);
+        const expected = new WatchTargetChange(
+          WatchTargetChangeState.Added,
+          [1, 4]
+        );
         const actual = fromWatchChange(s, {
           targetChange: { targetChangeType: 'ADD', targetIds: [1, 4] }
         });

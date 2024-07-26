@@ -18,7 +18,7 @@
 import * as ts from 'typescript';
 
 // `undefined` is treated as an identifier by TSC, but not part of any externs.
-const blacklist = ['undefined'];
+const ignoredIdentifiers = ['undefined'];
 
 /**
  * Processes TypeScript source files and renames all identifiers that do not
@@ -46,7 +46,7 @@ class RenameInternals {
       const name = node.escapedText.toString();
       if (
         !this.publicApi.has(name) &&
-        blacklist.indexOf(node.escapedText.toString()) === -1
+        ignoredIdentifiers.indexOf(node.escapedText.toString()) === -1
       ) {
         const newIdentifier = ts.createIdentifier(this.prefix + name);
         ts.setSourceMapRange(newIdentifier, ts.getSourceMapRange(node));
@@ -65,7 +65,7 @@ export interface SDKMinifierOptions {
   publicIdentifiers: Set<string>;
   /**
    * A prefix to append to all identifiers that are not referencing the Public
-   * API. Defauls to '_'.
+   * API. Defaults to '_'.
    */
   prefix?: string;
 }

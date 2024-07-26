@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 import { DatabaseId } from '../core/database_info';
 import { JsonProtoSerializer } from '../remote/serializer';
 

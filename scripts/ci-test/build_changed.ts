@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-import { TestReason, getTestTasks, filterTasks } from './tasks';
+import { TestReason, getTestTasks, filterTasks, logTasks } from './tasks';
 import { spawn } from 'child-process-promise';
 import chalk from 'chalk';
 import { resolve } from 'path';
@@ -23,18 +23,17 @@ import * as yargs from 'yargs';
 import { testConfig, TestConfig } from './testConfig';
 const root = resolve(__dirname, '../..');
 
-const argv = yargs.options({
-  // TODO: remove once modular SDKs become official
-  buildAppExp: {
-    type: 'boolean',
-    desc:
-      'whether or not build @firebase/app-exp first. It is a hack required to build Firestore'
-  }
-}).argv;
+const argv = yargs
+  .options({
+    buildAll: {
+      type: 'boolean',
+      desc: 'if true, build all packages. Used in Test Auth workflow because Auth tests depends on the firebase package'
+    }
+  })
+  .parseSync();
 
 const allTestConfigNames = Object.keys(testConfig);
-const inputTestConfigName = argv._[0];
-const buildAppExp = argv.buildAppExp;
+const inputTestConfigName = argv._[0].toString();
 
 if (!inputTestConfigName) {
   throw Error(`
@@ -54,33 +53,29 @@ if (!allTestConfigNames.includes(inputTestConfigName)) {
 
 const config = testConfig[inputTestConfigName]!;
 
-buildForTests(config, buildAppExp);
+buildForTests(config, argv);
 
-async function buildForTests(config: TestConfig, buildAppExp = false) {
+interface Options {
+  buildAll?: boolean;
+}
+
+async function buildForTests(
+  config: TestConfig,
+  { buildAll = false }: Options
+) {
   try {
     const testTasks = filterTasks(await getTestTasks(), config);
-
+    // print tasks for info
+    logTasks(testTasks);
     if (testTasks.length === 0) {
       console.log(chalk`{green No test tasks. Skipping all builds }`);
       return;
     }
 
-    // hack to build Firestore which depends on @firebase/app-exp (because of firestore exp),
-    // but doesn't list it as a dependency in its package.json
-    // TODO: remove once modular SDKs become official
-    if (buildAppExp) {
-      await spawn(
-        'npx',
-        [
-          'lerna',
-          'run',
-          '--scope',
-          '@firebase/app-exp',
-          '--include-dependencies',
-          'build'
-        ],
-        { stdio: 'inherit', cwd: root }
-      );
+    // build all and return
+    if (buildAll) {
+      await spawn('yarn', ['build'], { stdio: 'inherit', cwd: root });
+      return;
     }
 
     const lernaCmd = ['lerna', 'run'];

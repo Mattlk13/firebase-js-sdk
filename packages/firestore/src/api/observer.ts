@@ -16,12 +16,13 @@
  */
 
 import { JsonObject } from '../model/object_value';
+import { FirestoreError } from '../util/error';
 
 /**
  * Observer/Subscribe interfaces.
  */
 export type NextFn<T> = (value: T) => void;
-export type ErrorFn = (error: Error) => void;
+export type ErrorFn = (error: FirestoreError) => void;
 export type CompleteFn = () => void;
 
 // Allow for any of the Observer methods to be undefined.
@@ -31,11 +32,7 @@ export interface PartialObserver<T> {
   complete?: CompleteFn;
 }
 
-export interface Unsubscribe {
-  (): void;
-}
-
-export function isPartialObserver(obj: unknown): boolean {
+export function isPartialObserver<T>(obj: unknown): obj is PartialObserver<T> {
   return implementsAnyMethods(obj, ['next', 'error', 'complete']);
 }
 

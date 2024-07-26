@@ -20,21 +20,18 @@
  */
 import { Metadata } from '../metadata';
 
-import * as json from './json';
+import { jsonObjectOrNull } from './json';
 import { Location } from './location';
-import * as path from './path';
-import * as type from './type';
-import * as UrlUtils from './url';
+import { lastComponent } from './path';
+import { isString } from './type';
+import { makeUrl, makeQueryString } from './url';
 import { Reference } from '../reference';
-import { StorageService } from '../service';
+import { FirebaseStorageImpl } from '../service';
 
 export function noXform_<T>(metadata: Metadata, value: T): T {
   return value;
 }
 
-/**
- * @struct
- */
 class Mapping<T> {
   local: string;
   writable: boolean;
@@ -58,10 +55,10 @@ export { Mappings };
 let mappings_: Mappings | null = null;
 
 export function xformPath(fullPath: string | undefined): string | undefined {
-  if (!type.isString(fullPath) || fullPath.length < 2) {
+  if (!isString(fullPath) || fullPath.length < 2) {
     return fullPath;
   } else {
-    return path.lastComponent(fullPath);
+    return lastComponent(fullPath);
   }
 }
 
@@ -90,9 +87,9 @@ export function getMappings(): Mappings {
    */
   function xformSize(
     _metadata: Metadata,
-    size: number | string | undefined
+    size?: number | string
   ): number | undefined {
-    if (type.isDef(size)) {
+    if (size !== undefined) {
       return Number(size);
     } else {
       return size;
@@ -114,18 +111,18 @@ export function getMappings(): Mappings {
   return mappings_;
 }
 
-export function addRef(metadata: Metadata, service: StorageService): void {
+export function addRef(metadata: Metadata, service: FirebaseStorageImpl): void {
   function generateRef(): Reference {
     const bucket: string = metadata['bucket'] as string;
     const path: string = metadata['fullPath'] as string;
     const loc = new Location(bucket, path);
-    return service.makeStorageReference(loc);
+    return service._makeStorageReference(loc);
   }
   Object.defineProperty(metadata, 'ref', { get: generateRef });
 }
 
 export function fromResource(
-  service: StorageService,
+  service: FirebaseStorageImpl,
   resource: { [name: string]: unknown },
   mappings: Mappings
 ): Metadata {
@@ -144,11 +141,11 @@ export function fromResource(
 }
 
 export function fromResourceString(
-  service: StorageService,
+  service: FirebaseStorageImpl,
   resourceString: string,
   mappings: Mappings
 ): Metadata | null {
-  const obj = json.jsonObjectOrNull(resourceString);
+  const obj = jsonObjectOrNull(resourceString);
   if (obj === null) {
     return null;
   }
@@ -158,13 +155,15 @@ export function fromResourceString(
 
 export function downloadUrlFromResourceString(
   metadata: Metadata,
-  resourceString: string
+  resourceString: string,
+  host: string,
+  protocol: string
 ): string | null {
-  const obj = json.jsonObjectOrNull(resourceString);
+  const obj = jsonObjectOrNull(resourceString);
   if (obj === null) {
     return null;
   }
-  if (!type.isString(obj['downloadTokens'])) {
+  if (!isString(obj['downloadTokens'])) {
     // This can happen if objects are uploaded through GCS and retrieved
     // through list, so we don't want to throw an Error.
     return null;
@@ -179,8 +178,8 @@ export function downloadUrlFromResourceString(
     const bucket: string = metadata['bucket'] as string;
     const path: string = metadata['fullPath'] as string;
     const urlPart = '/b/' + encode(bucket) + '/o/' + encode(path);
-    const base = UrlUtils.makeUrl(urlPart);
-    const queryString = UrlUtils.makeQueryString({
+    const base = makeUrl(urlPart, host, protocol);
+    const queryString = makeQueryString({
       alt: 'media',
       token
     });
@@ -190,7 +189,7 @@ export function downloadUrlFromResourceString(
 }
 
 export function toResourceString(
-  metadata: Metadata,
+  metadata: Partial<Metadata>,
   mappings: Mappings
 ): string {
   const resource: {
@@ -204,24 +203,4 @@ export function toResourceString(
     }
   }
   return JSON.stringify(resource);
-}
-
-export function metadataValidator(p: unknown): void {
-  if (!type.isObject(p) || !p) {
-    throw 'Expected Metadata object.';
-  }
-  for (const key in p) {
-    if (p.hasOwnProperty(key)) {
-      const val = p[key];
-      if (key === 'customMetadata') {
-        if (!type.isObject(val)) {
-          throw 'Expected object for \'customMetadata\' mapping.';
-        }
-      } else {
-        if (type.isNonNullObject(val)) {
-          throw "Mapping for '" + key + "' cannot be an object.";
-        }
-      }
-    }
-  }
 }

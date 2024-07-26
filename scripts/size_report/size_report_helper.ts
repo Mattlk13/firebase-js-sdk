@@ -27,7 +27,7 @@ export enum RequestEndpoint {
 }
 export const runId = process.env.GITHUB_RUN_ID || 'local-run-id';
 
-const METRICS_SERVICE_URL = process.env.METRICS_SERVICE_URL!;
+const METRICS_SERVICE_URL = 'https://metric-service-tv5rmd4a6q-uc.a.run.app';
 
 function constructRequestPath(requestEndpoint: string): string {
   const repo = process.env.GITHUB_REPOSITORY;
@@ -77,7 +77,7 @@ export function upload(
     console.log(`Response status code: ${response.statusCode}`);
     response.on('data', console.log);
     response.on('end', () => {
-      if (response.statusCode !== 202) {
+      if (response.statusCode !== 200 && response.statusCode !== 202) {
         process.exit(1);
       }
     });

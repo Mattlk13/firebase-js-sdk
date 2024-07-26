@@ -15,18 +15,18 @@
  * limitations under the License.
  */
 
-import * as nodeFetch from 'node-fetch';
+import { fetch as undiciFetch } from 'undici';
 
-import { FetchConnection } from '../browser_lite/fetch_connection';
 import { DatabaseInfo } from '../../core/database_info';
 import { Connection } from '../../remote/connection';
+import { FetchConnection } from '../browser_lite/fetch_connection';
 
 export { newConnectivityMonitor } from '../browser/connection';
 
 /** Initializes the HTTP connection for the REST API. */
 export function newConnection(databaseInfo: DatabaseInfo): Connection {
-  // node-fetch is meant to be API compatible with `fetch`, but its type doesn't
+  // undici is meant to be API compatible with `fetch`, but its type doesn't
   // match 100%.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return new FetchConnection(databaseInfo, nodeFetch as any);
+  return new FetchConnection(databaseInfo, undiciFetch as any);
 }

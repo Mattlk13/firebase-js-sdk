@@ -15,18 +15,24 @@
  * limitations under the License.
  */
 
-import { resolve } from 'path';
 import * as fs from 'fs';
-import { execSync } from 'child_process';
+import * as path from 'path';
+import * as rollup from 'rollup';
 import * as terser from 'terser';
+
+import { execSync } from 'child_process';
 import {
   upload,
   runId,
   RequestBody,
   RequestEndpoint
 } from './size_report_helper';
+import { generateReportForBundles } from '../../repo-scripts/size-analysis/analyze-all-bundles';
+import { glob } from 'glob';
 
-interface Report {
+import commonjs from '@rollup/plugin-commonjs';
+
+export interface Report {
   sdk: string;
   type: string;
   value: number;
@@ -35,122 +41,125 @@ interface BinarySizeRequestBody extends RequestBody {
   metric: string;
   results: Report[];
 }
-// CDN scripts
+
 function generateReportForCDNScripts(): Report[] {
   const reports = [];
-  const firebaseRoot = resolve(__dirname, '../../packages/firebase');
+  const firebaseRoot = path.resolve(__dirname, '../../packages/firebase');
   const pkgJson = require(`${firebaseRoot}/package.json`);
+  const compatPkgJson = require(`${firebaseRoot}/compat/package.json`);
 
   const special_files = [
-    'firebase-performance-standalone.es2017.js',
-    'firebase-performance-standalone.js',
-    'firebase-firestore.memory.js',
-    'firebase.js'
+    'firebase-performance-standalone-compat.es2017.js',
+    'firebase-performance-standalone-compat.js',
+    'firebase-compat.js'
   ];
 
   const files = [
     ...special_files.map((file: string) => `${firebaseRoot}/${file}`),
     ...pkgJson.components.map(
-      (component: string) => `${firebaseRoot}/firebase-${component}.js`
+      (component: string) =>
+        `${firebaseRoot}/firebase-${component.replace('/', '-')}.js`
+    ),
+    ...compatPkgJson.components.map(
+      (component: string) => `${firebaseRoot}/firebase-${component}-compat.js`
     )
   ];
 
   for (const file of files) {
     const { size } = fs.statSync(file);
     const fileName = file.split('/').slice(-1)[0];
-    reports.push(makeReportObject('firebase', fileName, size));
+    reports.push({ sdk: 'firebase', type: fileName, value: size });
   }
 
   return reports;
 }
 
-// NPM packages
-function generateReportForNPMPackages(): Report[] {
+async function generateReportForNPMPackages(): Promise<Report[]> {
+  const reports: Report[] = [];
+  const packageInfo = JSON.parse(
+    execSync('npx lerna ls --json --scope @firebase/*').toString()
+  );
+  for (const info of packageInfo) {
+    const packages = await findAllPackages(info.location);
+    for (const pkg of packages) {
+      try {
+        reports.push(...(await collectBinarySize(pkg)));
+      } catch (e) {
+        // log errors and continue to the next package
+        console.log(
+          `failed to generate report for ${pkg}.
+           error: ${e}`
+        );
+      }
+    }
+  }
+  return reports;
+}
+
+async function findAllPackages(root: string): Promise<string[]> {
+  return new Promise((resolve, reject) => {
+    glob(
+      '**/package.json',
+      { cwd: root, ignore: '**/node_modules/**' },
+      (err, files) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(files.map(x => path.resolve(root, x)));
+        }
+      }
+    );
+  });
+}
+
+async function collectBinarySize(pkg: string): Promise<Report[]> {
   const reports: Report[] = [];
   const fields = [
     'main',
     'module',
-    'esm2017',
     'browser',
+    'esm5',
     'react-native',
+    'cordova',
     'lite',
-    'lite-esm2017'
+    'lite-esm5'
   ];
+  const json = require(pkg);
+  for (const field of fields) {
+    if (json[field]) {
+      const artifact = path.resolve(path.dirname(pkg), json[field]);
 
-  const packageInfo = JSON.parse(
-    execSync('npx lerna ls --json --scope @firebase/*').toString()
-  );
+      // Need to create a bundle and get the size of the bundle instead of reading the size of the file directly.
+      // It is because some packages might be split into multiple files in order to share code between entry points.
+      const bundle = await rollup.rollup({
+        input: artifact,
+        plugins: [commonjs()]
+      });
 
-  for (const pkg of packageInfo) {
-    // we traverse the dir in order to include binaries for submodules, e.g. @firebase/firestore/memory
-    // Currently we only traverse 1 level deep because we don't have any submodule deeper than that.
-    traverseDirs(pkg.location, collectBinarySize, 0, 1);
-  }
+      const { output } = await bundle.generate({ format: 'es' });
+      const rawCode = output[0].code;
 
-  function collectBinarySize(path: string) {
-    const packageJsonPath = `${path}/package.json`;
-    if (!fs.existsSync(packageJsonPath)) {
-      return;
-    }
+      // remove comments and whitespaces, then get size
+      const { code } = await terser.minify(rawCode, {
+        format: {
+          comments: false
+        },
+        mangle: false,
+        compress: false
+      });
 
-    const packageJson = require(packageJsonPath);
-
-    for (const field of fields) {
-      if (packageJson[field]) {
-        const filePath = `${path}/${packageJson[field]}`;
-        const rawCode = fs.readFileSync(filePath, 'utf-8');
-
-        // remove comments and whitespaces, then get size
-        const { code } = terser.minify(rawCode, {
-          output: {
-            comments: false
-          },
-          mangle: false,
-          compress: false
-        });
-
-        const size = Buffer.byteLength(code!, 'utf-8');
-        reports.push(makeReportObject(packageJson.name, field, size));
-      }
+      const size = Buffer.byteLength(code!, 'utf-8');
+      reports.push({ sdk: json.name, type: field, value: size });
     }
   }
-
   return reports;
 }
 
-function traverseDirs(
-  path: string,
-  executor: Function,
-  level: number,
-  levelLimit: number
-) {
-  if (level > levelLimit) {
-    return;
-  }
-
-  executor(path);
-
-  for (const name of fs.readdirSync(path)) {
-    const p = `${path}/${name}`;
-
-    if (fs.lstatSync(p).isDirectory()) {
-      traverseDirs(p, executor, level + 1, levelLimit);
-    }
-  }
-}
-
-function makeReportObject(sdk: string, type: string, value: number): Report {
-  return {
-    sdk,
-    type,
-    value
-  };
-}
-
-function generateSizeReport(): BinarySizeRequestBody {
+async function generateSizeReport(): Promise<BinarySizeRequestBody> {
   const reports: Report[] = [
     ...generateReportForCDNScripts(),
-    ...generateReportForNPMPackages()
+    ...(await generateReportForNPMPackages()),
+    ...(await generateReportForBundles())
   ];
 
   for (const r of reports) {
@@ -158,7 +167,7 @@ function generateSizeReport(): BinarySizeRequestBody {
   }
 
   console.log(
-    `Github Action URL: https://github.com/${process.env.GITHUB_REPOSITORY}/actions/runs/${runId}`
+    `GitHub Action URL: https://github.com/${process.env.GITHUB_REPOSITORY}/actions/runs/${runId}`
   );
 
   return {
@@ -168,5 +177,11 @@ function generateSizeReport(): BinarySizeRequestBody {
   };
 }
 
-const report = generateSizeReport();
-upload(report, RequestEndpoint.BINARY_SIZE);
+generateSizeReport()
+  .then(report => {
+    upload(report, RequestEndpoint.BINARY_SIZE);
+  })
+  .catch(err => {
+    console.error(err);
+    process.exit(1);
+  });

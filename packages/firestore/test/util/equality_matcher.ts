@@ -57,6 +57,20 @@ function customDeepEqual(
       return customMatcher.equalsFn(left, right);
     }
   }
+  if (left && typeof left === 'object' && right && typeof right === 'object') {
+    // The `isEqual` check below returns true if firestore-exp types are
+    // compared with API types from Firestore classic. We do want to
+    // differentiate between these types in our tests to ensure that the we do
+    // not return firestore-exp types in the classic SDK.
+    const leftObj = left as Record<string, unknown>;
+    const rightObj = right as Record<string, unknown>;
+    if (
+      leftObj.constructor.name === rightObj.constructor.name &&
+      leftObj.constructor !== rightObj.constructor
+    ) {
+      return false;
+    }
+  }
   if (typeof left === 'object' && left && 'isEqual' in left) {
     return (left as Equatable<unknown>).isEqual(right);
   }
@@ -109,7 +123,7 @@ function customDeepEqual(
 }
 
 /** The original equality function passed in by chai(). */
-let originalFunction: ((r: unknown, l: unknown) => boolean) | null = null;
+let originalFunction: ((expected: unknown) => void) | null = null;
 
 export function addEqualityMatcher(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -122,15 +136,10 @@ export function addEqualityMatcher(
       const Assertion = chai.Assertion;
 
       // eslint-disable-next-line @typescript-eslint/explicit-function-return-type
-      const assertEql = (_super: (r: unknown, l: unknown) => boolean) => {
+      const assertEql = (_super: (expected: unknown) => void) => {
         originalFunction = originalFunction || _super;
-        return function (
-          this: Chai.Assertion,
-          expected?: unknown,
-          msg?: unknown
-        ): void {
+        return function (this: Chai.Assertion, expected?: unknown): void {
           if (isActive) {
-            utils.flag(this, 'message', msg);
             const actual = utils.flag(this, 'object');
 
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -147,7 +156,7 @@ export function addEqualityMatcher(
               /*showDiff=*/ true
             );
           } else if (originalFunction) {
-            originalFunction.call(this, expected, msg);
+            originalFunction.call(this, expected);
           }
         };
       };

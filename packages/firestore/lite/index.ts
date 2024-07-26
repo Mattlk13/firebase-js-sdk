@@ -1,4 +1,13 @@
 /**
+ * Firestore Lite
+ *
+ * @remarks Firestore Lite is a small online-only SDK that allows read
+ * and write access to your Firestore database. All operations connect
+ * directly to the backend, and `onSnapshot()` APIs are not supported.
+ * @packageDocumentation
+ */
+
+/**
  * @license
  * Copyright 2020 Google LLC
  *
@@ -16,72 +25,131 @@
  */
 
 import { registerFirestore } from './register';
-
 registerFirestore();
 
 export {
-  Firestore as FirebaseFirestore,
-  initializeFirestore,
-  getFirestore,
-  terminate
-} from './src/api/database';
+  aggregateQuerySnapshotEqual,
+  getCount,
+  getAggregate,
+  count,
+  sum,
+  average,
+  aggregateFieldEqual
+} from '../src/lite-api/aggregate';
 
 export {
+  AggregateField,
+  AggregateFieldType,
+  AggregateSpec,
+  AggregateSpecData,
+  AggregateQuerySnapshot,
+  AggregateType
+} from '../src/lite-api/aggregate_types';
+
+export { FirestoreSettings as Settings } from '../src/lite-api/settings';
+
+export {
+  Firestore as Firestore,
+  EmulatorMockTokenOptions,
+  initializeFirestore,
+  getFirestore,
+  terminate,
+  connectFirestoreEmulator
+} from '../src/lite-api/database';
+
+export {
+  DocumentData,
+  UpdateData,
+  WithFieldValue,
+  PartialWithFieldValue,
+  SetOptions,
   DocumentReference,
   Query,
-  QueryConstraint,
   CollectionReference,
   collection,
   collectionGroup,
   doc,
-  parent,
-  getDoc,
-  getDocs,
-  deleteDoc,
-  setDoc,
-  updateDoc,
-  addDoc,
   refEqual,
-  queryEqual,
-  startAt,
-  startAfter,
+  queryEqual
+} from '../src/lite-api/reference';
+
+export {
+  and,
   endAt,
   endBefore,
-  query,
+  startAt,
+  startAfter,
   limit,
   limitToLast,
   where,
-  orderBy
-} from './src/api/reference';
+  or,
+  orderBy,
+  query,
+  QueryConstraint,
+  QueryConstraintType,
+  QueryCompositeFilterConstraint,
+  QueryFilterConstraint,
+  QueryFieldFilterConstraint,
+  QueryOrderByConstraint,
+  QueryLimitConstraint,
+  QueryNonFilterConstraint,
+  QueryStartAtConstraint,
+  QueryEndAtConstraint,
+  OrderByDirection,
+  WhereFilterOp
+} from '../src/lite-api/query';
 
-// TOOD(firestorelite): Add tests when Queries are usable
-export { FieldPath, documentId } from './src/api/field_path';
-
-// TOOD(firestorelite): Add tests when setDoc() is available
 export {
-  FieldValue,
-  deleteField,
+  addDoc,
+  deleteDoc,
+  updateDoc,
+  setDoc,
+  getDoc,
+  getDocs
+} from '../src/lite-api/reference_impl';
+
+export {
+  Primitive,
+  NestedUpdateFields,
+  ChildUpdateFields,
+  AddPrefixToKeys,
+  UnionToIntersection
+} from '../src/lite-api/types';
+
+// TODO(firestorelite): Add tests when Queries are usable
+export { FieldPath, documentId } from '../src/lite-api/field_path';
+
+// TODO(firestorelite): Add tests when setDoc() is available
+export { FieldValue } from '../src/lite-api/field_value';
+
+export {
   increment,
   arrayRemove,
   arrayUnion,
-  serverTimestamp
-} from './src/api/field_value';
+  serverTimestamp,
+  deleteField
+} from '../src/lite-api/field_value_impl';
 
 export {
+  FirestoreDataConverter,
   DocumentSnapshot,
   QueryDocumentSnapshot,
   QuerySnapshot,
   snapshotEqual
-} from './src/api/snapshot';
+} from '../src/lite-api/snapshot';
 
-export { WriteBatch, writeBatch } from './src/api/write_batch';
+export { WriteBatch, writeBatch } from '../src/lite-api/write_batch';
 
-export { Transaction, runTransaction } from './src/api/transaction';
+export { TransactionOptions } from '../src/lite-api/transaction_options';
 
-export { setLogLevel } from '../src/util/log';
+export { Transaction, runTransaction } from '../src/lite-api/transaction';
 
-export { Blob } from '../src/api/blob';
+export { setLogLevel, LogLevelString as LogLevel } from '../src/util/log';
 
-export { GeoPoint } from '../src/api/geo_point';
+export { Bytes } from '../src/lite-api/bytes';
 
-export { Timestamp } from '../src/api/timestamp';
+export { GeoPoint } from '../src/lite-api/geo_point';
+
+export { Timestamp } from '../src/lite-api/timestamp';
+
+export { FirestoreErrorCode, FirestoreError } from '../src/util/error';

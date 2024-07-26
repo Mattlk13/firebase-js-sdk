@@ -16,15 +16,15 @@
  */
 
 import { expect } from 'chai';
+
 import { SnapshotVersion } from '../../../src/core/snapshot_version';
-import { Document, NoDocument } from '../../../src/model/document';
-import { addEqualityMatcher } from '../../util/equality_matcher';
-import { key, setMutation } from '../../util/helpers';
-import { withTestDatastore } from '../util/internal_helpers';
 import {
   invokeBatchGetDocumentsRpc,
   invokeCommitRpc
 } from '../../../src/remote/datastore';
+import { addEqualityMatcher } from '../../util/equality_matcher';
+import { key, setMutation } from '../../util/helpers';
+import { withTestDatastore } from '../util/internal_helpers';
 
 describe('Remote Storage', () => {
   addEqualityMatcher();
@@ -46,12 +46,10 @@ describe('Remote Storage', () => {
       expect(docs.length).to.equal(1);
 
       const doc = docs[0];
-      expect(doc).to.be.an.instanceof(Document);
-      if (doc instanceof Document) {
-        expect(doc.data()).to.deep.equal(mutation.value);
-        expect(doc.key).to.deep.equal(k);
-        expect(SnapshotVersion.min().compareTo(doc.version)).to.be.lessThan(0);
-      }
+      expect(doc.isFoundDocument()).to.be.true;
+      expect(doc.data).to.deep.equal(mutation.value);
+      expect(doc.key).to.deep.equal(k);
+      expect(SnapshotVersion.min().compareTo(doc.version)).to.be.lessThan(0);
     });
   });
 
@@ -63,11 +61,9 @@ describe('Remote Storage', () => {
       expect(docs.length).to.equal(1);
 
       const doc = docs[0];
-      expect(doc).to.be.an.instanceof(NoDocument);
-      if (doc instanceof NoDocument) {
-        expect(doc.key).to.deep.equal(k);
-        expect(SnapshotVersion.min().compareTo(doc.version)).to.be.lessThan(0);
-      }
+      expect(doc.isNoDocument()).to.be.true;
+      expect(doc.key).to.deep.equal(k);
+      expect(SnapshotVersion.min().compareTo(doc.version)).to.be.lessThan(0);
     });
   });
 });

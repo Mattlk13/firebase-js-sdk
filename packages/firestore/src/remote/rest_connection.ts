@@ -15,14 +15,21 @@
  * limitations under the License.
  */
 
-import { Token } from '../api/credentials';
-import { DatabaseId, DatabaseInfo } from '../core/database_info';
 import { SDK_VERSION } from '../../src/core/version';
-import { Connection, Stream } from './connection';
-import { logDebug, logWarn } from '../util/log';
-import { FirestoreError } from '../util/error';
-import { StringMap } from '../util/types';
+import { Token } from '../api/credentials';
+import {
+  DatabaseId,
+  DatabaseInfo,
+  DEFAULT_DATABASE_NAME
+} from '../core/database_info';
+import { ResourcePath } from '../model/path';
 import { debugAssert } from '../util/assert';
+import { generateUniqueDebugId } from '../util/debug_uid';
+import { FirestoreError } from '../util/error';
+import { logDebug, logWarn } from '../util/log';
+import { StringMap } from '../util/types';
+
+import { Connection, Stream } from './connection';
 
 const LOG_TAG = 'RestConnection';
 
@@ -36,10 +43,15 @@ const RPC_NAME_URL_MAPPING: StringMap = {};
 RPC_NAME_URL_MAPPING['BatchGetDocuments'] = 'batchGet';
 RPC_NAME_URL_MAPPING['Commit'] = 'commit';
 RPC_NAME_URL_MAPPING['RunQuery'] = 'runQuery';
+RPC_NAME_URL_MAPPING['RunAggregationQuery'] = 'runAggregationQuery';
 
 const RPC_URL_VERSION = 'v1';
-const X_GOOG_API_CLIENT_VALUE = 'gl-js/ fire/' + SDK_VERSION;
 
+// SDK_VERSION is updated to different value at runtime depending on the entry point,
+// so we need to get its value when we need it in a function.
+function getGoogApiClientValue(): string {
+  return 'gl-js/ fire/' + SDK_VERSION;
+}
 /**
  * Base class for all Rest-based connections to the backend (WebChannel and
  * HTTP).
@@ -47,41 +59,54 @@ const X_GOOG_API_CLIENT_VALUE = 'gl-js/ fire/' + SDK_VERSION;
 export abstract class RestConnection implements Connection {
   protected readonly databaseId: DatabaseId;
   protected readonly baseUrl: string;
-  private readonly databaseRoot: string;
+  private readonly databasePath: string;
+  private readonly requestParams: string;
+
+  get shouldResourcePathBeIncludedInRequest(): boolean {
+    // Both `invokeRPC()` and `invokeStreamingRPC()` use their `path` arguments to determine
+    // where to run the query, and expect the `request` to NOT specify the "path".
+    return false;
+  }
 
   constructor(private readonly databaseInfo: DatabaseInfo) {
     this.databaseId = databaseInfo.databaseId;
     const proto = databaseInfo.ssl ? 'https' : 'http';
+    const projectId = encodeURIComponent(this.databaseId.projectId);
+    const databaseId = encodeURIComponent(this.databaseId.database);
     this.baseUrl = proto + '://' + databaseInfo.host;
-    this.databaseRoot =
-      'projects/' +
-      this.databaseId.projectId +
-      '/databases/' +
-      this.databaseId.database +
-      '/documents';
+    this.databasePath = `projects/${projectId}/databases/${databaseId}`;
+    this.requestParams =
+      this.databaseId.database === DEFAULT_DATABASE_NAME
+        ? `project_id=${projectId}`
+        : `project_id=${projectId}&database_id=${databaseId}`;
   }
 
   invokeRPC<Req, Resp>(
     rpcName: string,
-    path: string,
+    path: ResourcePath,
     req: Req,
-    token: Token | null
+    authToken: Token | null,
+    appCheckToken: Token | null
   ): Promise<Resp> {
-    const url = this.makeUrl(rpcName, path);
-    logDebug(LOG_TAG, 'Sending: ', url, req);
+    const streamId = generateUniqueDebugId();
+    const url = this.makeUrl(rpcName, path.toUriEncodedString());
+    logDebug(LOG_TAG, `Sending RPC '${rpcName}' ${streamId}:`, url, req);
 
-    const headers = {};
-    this.modifyHeadersForRequest(headers, token);
+    const headers: StringMap = {
+      'google-cloud-resource-prefix': this.databasePath,
+      'x-goog-request-params': this.requestParams
+    };
+    this.modifyHeadersForRequest(headers, authToken, appCheckToken);
 
     return this.performRPCRequest<Req, Resp>(rpcName, url, headers, req).then(
       response => {
-        logDebug(LOG_TAG, 'Received: ', response);
+        logDebug(LOG_TAG, `Received RPC '${rpcName}' ${streamId}: `, response);
         return response;
       },
       (err: FirestoreError) => {
         logWarn(
           LOG_TAG,
-          `${rpcName} failed with error: `,
+          `RPC '${rpcName}' ${streamId} failed with error: `,
           err,
           'url: ',
           url,
@@ -95,18 +120,27 @@ export abstract class RestConnection implements Connection {
 
   invokeStreamingRPC<Req, Resp>(
     rpcName: string,
-    path: string,
+    path: ResourcePath,
     request: Req,
-    token: Token | null
+    authToken: Token | null,
+    appCheckToken: Token | null,
+    expectedResponseCount?: number
   ): Promise<Resp[]> {
     // The REST API automatically aggregates all of the streamed results, so we
     // can just use the normal invoke() method.
-    return this.invokeRPC<Req, Resp[]>(rpcName, path, request, token);
+    return this.invokeRPC<Req, Resp[]>(
+      rpcName,
+      path,
+      request,
+      authToken,
+      appCheckToken
+    );
   }
 
   abstract openStream<Req, Resp>(
     rpcName: string,
-    token: Token | null
+    authToken: Token | null,
+    appCheckToken: Token | null
   ): Stream<Req, Resp>;
 
   /**
@@ -115,22 +149,26 @@ export abstract class RestConnection implements Connection {
    */
   protected modifyHeadersForRequest(
     headers: StringMap,
-    token: Token | null
+    authToken: Token | null,
+    appCheckToken: Token | null
   ): void {
-    headers['X-Goog-Api-Client'] = X_GOOG_API_CLIENT_VALUE;
+    headers['X-Goog-Api-Client'] = getGoogApiClientValue();
 
     // Content-Type: text/plain will avoid preflight requests which might
     // mess with CORS and redirects by proxies. If we add custom headers
     // we will need to change this code to potentially use the $httpOverwrite
-    // parameter supported by ESF to avoid	triggering preflight requests.
+    // parameter supported by ESF to avoid triggering preflight requests.
     headers['Content-Type'] = 'text/plain';
 
-    if (token) {
-      for (const header in token.authHeaders) {
-        if (token.authHeaders.hasOwnProperty(header)) {
-          headers[header] = token.authHeaders[header];
-        }
-      }
+    if (this.databaseInfo.appId) {
+      headers['X-Firebase-GMPID'] = this.databaseInfo.appId;
+    }
+
+    if (authToken) {
+      authToken.headers.forEach((value, key) => (headers[key] = value));
+    }
+    if (appCheckToken) {
+      appCheckToken.headers.forEach((value, key) => (headers[key] = value));
     }
   }
 
@@ -144,12 +182,21 @@ export abstract class RestConnection implements Connection {
     body: Req
   ): Promise<Resp>;
 
-  private makeUrl<Req>(rpcName: string, path: string): string {
+  private makeUrl(rpcName: string, path: string): string {
     const urlRpcName = RPC_NAME_URL_MAPPING[rpcName];
     debugAssert(
       urlRpcName !== undefined,
       'Unknown REST mapping for: ' + rpcName
     );
     return `${this.baseUrl}/${RPC_URL_VERSION}/${path}:${urlRpcName}`;
+  }
+
+  /**
+   * Closes and cleans up any resources associated with the connection. This
+   * implementation is a no-op because there are no resources associated
+   * with the RestConnection that need to be cleaned up.
+   */
+  terminate(): void {
+    // No-op
   }
 }
